@@ -8,6 +8,7 @@ import sqlite3
 import datetime
 import math
 import feedparser
+import os
 
 # --- Trading Logic and Analysis ---
 def fetch_and_analyze_data(symbol, timeframe='1h', limit=200):
@@ -133,9 +134,9 @@ def generate_trading_signal(analyzed_data, timeframe, lang):
 
 # --- Database & Subscription Management ---
 DATABASE_NAME = 'crypto_bot.db'
-TOKEN = "7502779556:AAGLINA2ZD0xmeuz0Csbl50IdBhPoeyPSYY"
-ADMIN_USER_ID = 1793820239
-YOUR_WALLET_ADDRESS = "TQCKc4Ri6tgGTKfXDMmwfsJtBA4srRWsGM"
+TOKEN = os.getenv('TOKEN')
+ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID'))
+YOUR_WALLET_ADDRESS = os.getenv('YOUR_WALLET_ADDRESS')
 
 user_state = {}
 
@@ -568,9 +569,9 @@ async def analyze_symbol_on_demand(update: Update, context: ContextTypes.DEFAULT
 # --- Admin Commands ---
 async def activate_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    translations = get_messages(lang)
     if user_id != ADMIN_USER_ID:
-        lang = get_user_language(user_id)
-        translations = get_messages(lang)
         await update.message.reply_text(translations['admin_only'])
         return
     
@@ -583,9 +584,9 @@ async def activate_subscription(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def deactivate_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    translations = get_messages(lang)
     if user_id != ADMIN_USER_ID:
-        lang = get_user_language(user_id)
-        translations = get_messages(lang)
         await update.message.reply_text(translations['admin_only'])
         return
     
@@ -598,17 +599,15 @@ async def deactivate_subscription(update: Update, context: ContextTypes.DEFAULT_
 
 async def check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    translations = get_messages(lang)
     if user_id != ADMIN_USER_ID:
-        lang = get_user_language(user_id)
-        translations = get_messages(lang)
         await update.message.reply_text(translations['admin_only'])
         return
     
     try:
         user_to_check = int(context.args[0])
         status = get_user_status(user_to_check)
-        lang = get_user_language(user_id)
-        translations = get_messages(lang)
         await update.message.reply_text(translations['status_msg'].format(user_id=user_to_check, status=status))
     except (IndexError, ValueError):
         await update.message.reply_text(translations['invalid_command'].format(command="/admin_status [user_id]"))
@@ -634,7 +633,7 @@ def save_sent_signal(user_id, symbol, timeframe, signal, trade_info):
     conn.commit()
     conn.close()
 
-async def send_alert(context: ContextTypes.DEFAULT_TYPE, symbol: str, timeframe: str, signal: str, trade_info: dict, lang):
+async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: str, timeframe: str, signal: str, trade_info: dict, lang: str):
     translations = get_messages(lang)
     message = translations['proactive_alert'].format(
         symbol=symbol,
@@ -686,7 +685,7 @@ async def monitor_and_find_signals(context: ContextTypes.DEFAULT_TYPE):
                         if not last_signal_id:
                             for user_id in get_subscribed_users():
                                 user_lang = get_user_language(user_id)
-                                await send_alert(context, symbol, timeframe, signal, trade_info, user_lang)
+                                await send_alert(context, user_id, symbol, timeframe, signal, trade_info, user_lang)
                                 save_sent_signal(user_id, symbol, timeframe, signal, trade_info)
         
     except Exception as e:
@@ -767,6 +766,24 @@ async def check_crypto_news(context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     setup_database()
+
+    # --- Getting variables from Render's environment ---
+    try:
+        token = os.getenv('TOKEN')
+        admin_user_id = int(os.getenv('ADMIN_USER_ID'))
+        your_wallet_address = os.getenv('YOUR_WALLET_ADDRESS')
+        if not token or not admin_user_id or not your_wallet_address:
+            raise ValueError("Environment variables not set correctly.")
+    except (ValueError, TypeError) as e:
+        print(f"Error reading environment variables: {e}")
+        return
+
+    # Using the variables
+    global TOKEN, ADMIN_USER_ID, YOUR_WALLET_ADDRESS
+    TOKEN = token
+    ADMIN_USER_ID = admin_user_id
+    YOUR_WALLET_ADDRESS = your_wallet_address
+
     app = Application.builder().token(TOKEN).build()
     job_queue = app.job_queue
     
