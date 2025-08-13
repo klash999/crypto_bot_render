@@ -29,7 +29,6 @@ DATABASE_NAME = 'crypto_bot.db'
 def setup_database():
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    # تعديل جدول users لإضافة تاريخ انتهاء الاشتراك
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -79,7 +78,6 @@ def update_user_settings(user_id, symbols, timeframes):
 def get_subscribed_users():
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    # التحقق من أن تاريخ الاشتراك لم ينتهِ
     current_time_iso = datetime.datetime.now().isoformat()
     cursor.execute('SELECT user_id, language, subscribed_symbols, subscribed_timeframes FROM users WHERE is_subscribed = 1 AND subscription_expiry_date > ?', (current_time_iso,))
     results = cursor.fetchall()
@@ -318,28 +316,6 @@ async def toggle_timeframe(query, translations):
     
     update_user_settings(user_id, subscribed_symbols, subscribed_timeframes)
     await show_timeframes_menu(query, translations)
-
-# --- Proactive Alerting System ---
-TIMEFRAMES_ENUM = {
-    "1h": Interval.INTERVAL_1_HOUR,
-    "4h": Interval.INTERVAL_4_HOURS,
-}
-
-async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: str, timeframe: str, signal: str, lang: str):
-    translations = get_messages(lang)
-    message = translations['signal_found'].format(
-        symbol=symbol,
-        timeframe=timeframe,
-        signal=signal
-    )
-    try:
-        if CHANNEL_ID:
-            await context.bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode='Markdown')
-        else:
-            await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
-        print(f"Alert sent to user {user_id} for {symbol} on {timeframe} - {signal}")
-    except Exception as e:
-        print(f"Failed to send alert to user {user_id}: {e}")
 
 async def monitor_tradingview_signals(context: ContextTypes.DEFAULT_TYPE):
     print("Running autonomous market scan...")
