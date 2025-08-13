@@ -169,7 +169,8 @@ def save_news_sent(link):
 # --- Localization & UI ---
 MESSAGES = {
     'ar': {
-        'welcome': "مرحباً! أنا بوت تداول تلقائي. 🤖\n\n**مميزات البوت:**\n\n🔹 **تنبيهات تلقائية:** إشارات شراء وبيع للعملات الرقمية.\n🔹 **أخبار عاجلة:** أحدث أخبار السوق من مصادر موثوقة.\n🔹 **تحليل فوري:** يمكنك تحليل أي عملة تريدها عبر أمر `/analyze`.\n\n**للاشتراك:**\n\n1. أرسل قيمة الاشتراك إلى محفظة Binance التالية:\n   `{binance_wallet_address}`\n\n2. **الباقات المتاحة:**\n   - **يومي:** {price_day}\n   - **أسبوعي:** {price_week}\n   - **شهري:** {price_month}\n\n3. أرسل صورة الإيصال ومعرف المستخدم الخاص بك (يمكنك الحصول عليه عبر الأمر /myid) للمدير ليتم تفعيل اشتراكك.",
+        'welcome': "مرحباً! أنا بوت تداول تلقائي. 🤖\n\n**مميزات البوت:**\n\n🔹 **تنبيهات تلقائية:** إشارات شراء وبيع للعملات الرقمية.\n🔹 **أخبار عاجلة:** أحدث أخبار السوق من مصادر موثوقة.\n🔹 **تحليل فوري:** يمكنك تحليل أي عملة تريدها عبر أمر `/analyze`.",
+        'subscription_info': "\n\n**للاشتراك:**\n\n1. أرسل قيمة الاشتراك إلى محفظة Binance التالية:\n   `{binance_wallet_address}`\n\n2. **الباقات المتاحة:**\n   - **يومي:** {price_day}\n   - **أسبوعي:** {price_week}\n   - **شهري:** {price_month}\n\n3. أرسل صورة الإيصال ومعرف المستخدم الخاص بك (يمكنك الحصول عليه عبر الأمر /myid) للمدير ليتم تفعيل اشتراكك.",
         'myid': "معرف المستخدم (User ID) الخاص بك هو:\n\n`{user_id}`\n\nقم بنسخه وإرساله للمدير لتفعيل اشتراكك.",
         'main_menu_unsubscribed': "عذراً، يجب أن تكون مشتركاً للوصول إلى هذه القائمة. للتفعيل، اتبع الخطوات في الرسالة الترحيبية /start.",
         'main_menu_subscribed': "أهلاً بك في القائمة الرئيسية. اختر الإعدادات التي تريدها.\n\nيمكنك أيضاً استخدام أمر `/analyze` لتحليل أي عملة تريدها.",
@@ -256,13 +257,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_language(user_id)
     translations = get_messages(lang)
     
-    await update.message.reply_text(translations['welcome'].format(
-        binance_wallet_address=BINANCE_WALLET_ADDRESS,
-        price_day=SUBSCRIPTION_PRICES['day'],
-        price_week=SUBSCRIPTION_PRICES['week'],
-        price_month=SUBSCRIPTION_PRICES['month']
-    ), parse_mode='Markdown')
-    await menu_command(update, context)
+    welcome_message = translations['welcome']
+    
+    if not is_user_subscribed(user_id):
+        welcome_message += translations['subscription_info'].format(
+            binance_wallet_address=BINANCE_WALLET_ADDRESS,
+            price_day=SUBSCRIPTION_PRICES['day'],
+            price_week=SUBSCRIPTION_PRICES['week'],
+            price_month=SUBSCRIPTION_PRICES['month']
+        )
+    
+    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+    
+    if is_user_subscribed(user_id):
+        await menu_command(update, context)
 
 async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -316,7 +324,8 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_language(user_id)
     translations = get_messages(lang)
-
+    
+    # This check ensures that only subscribed users get the full menu
     if not is_user_subscribed(user_id):
         await update.message.reply_text(translations['main_menu_unsubscribed'])
         return
