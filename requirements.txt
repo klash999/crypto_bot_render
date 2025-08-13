@@ -4,4 +4,4 @@ requests
 feedparser
 ccxt
 pandas
-TA-Lib
+TA-Lib==0.4.0
