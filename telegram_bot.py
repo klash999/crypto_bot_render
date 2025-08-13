@@ -10,8 +10,30 @@ import math
 import feedparser
 import os
 import requests
+from tradingview_ta import TA_Handler, Interval, Exchange
 
-# --- Trading Logic and Analysis ---
+# --- Trading Logic and Analysis (This part is simplified for clarity) ---
+def get_tradingview_signal(symbol, timeframe, exchange_name='BINANCE'):
+    try:
+        handler = TA_Handler(
+            symbol=symbol,
+            screener="crypto",
+            exchange=exchange_name,
+            interval=timeframe,
+        )
+        analysis = handler.get_analysis()
+        if analysis and analysis.summary:
+            # We will use the overall summary for a simple signal
+            recommendation = analysis.summary['RECOMMENDATION']
+            if recommendation == 'STRONG_BUY' or recommendation == 'BUY':
+                return 'BUY'
+            elif recommendation == 'STRONG_SELL' or recommendation == 'SELL':
+                return 'SELL'
+        return 'HOLD'
+    except Exception as e:
+        print(f"Error fetching signal for {symbol} from TradingView: {e}")
+        return 'ERROR'
+
 def fetch_and_analyze_data(symbol, timeframe='1h', limit=200):
     try:
         exchange = ccxt.binance()
@@ -114,7 +136,6 @@ def generate_trade_info(signal, latest_data, timeframe, lang):
     }
 
 def get_trend_strength(data_1d, data_4h):
-    # Trend based on SMA 200 on daily chart
     if data_1d is not None and len(data_1d) >= 200:
         if data_1d.iloc[-1]['close'] > data_1d.iloc[-1]['sma200']:
             daily_trend = 'صاعد'
@@ -125,7 +146,6 @@ def get_trend_strength(data_1d, data_4h):
     else:
         daily_trend = 'غير محدد'
 
-    # Momentum based on RSI on 4h chart
     if data_4h is not None and len(data_4h) > 1:
         if data_4h.iloc[-1]['rsi'] > 50:
             four_hour_momentum = 'صعودي'
@@ -139,6 +159,9 @@ def get_trend_strength(data_1d, data_4h):
     return daily_trend, four_hour_momentum
 
 def generate_trading_signal(analyzed_data, timeframe, lang, trend_info):
+    if analyzed_data is None or analyzed_data.empty:
+        return 'HOLD', None
+
     latest_data = analyzed_data.iloc[-1]
     latest_rsi = latest_data['rsi']
     latest_macd_hist = latest_data['macd_hist']
@@ -149,19 +172,16 @@ def generate_trading_signal(analyzed_data, timeframe, lang, trend_info):
     signal = 'HOLD'
     pattern_signal, pattern_name = analyze_patterns(analyzed_data)
 
-    # Main Strategy Logic - Combining Indicators and Multi-Timeframe Analysis
     if daily_trend == 'صاعد' and four_hour_momentum != 'هبوطي':
-        # Look for BUY signals in a bullish trend
         if (latest_rsi < 35 or latest_stoch_k < 20) and latest_data['close'] < latest_data['bb_lower']:
             signal = 'BUY'
-        elif latest_macd_hist > 0 and latest_data['volume'] > latest_data['volume'].mean() * 1.5:
+        elif latest_macd_hist > 0 and latest_data['volume'] > analyzed_data['volume'].mean() * 1.5:
             signal = 'BUY'
     
     elif daily_trend == 'هابط' and four_hour_momentum != 'صعودي':
-        # Look for SELL signals in a bearish trend
         if (latest_rsi > 65 or latest_stoch_k > 80) and latest_data['close'] > latest_data['bb_upper']:
             signal = 'SELL'
-        elif latest_macd_hist < 0 and latest_data['volume'] > latest_data['volume'].mean() * 1.5:
+        elif latest_macd_hist < 0 and latest_data['volume'] > analyzed_data['volume'].mean() * 1.5:
             signal = 'SELL'
 
     if pattern_signal is not None:
@@ -206,8 +226,7 @@ def setup_database():
             target3 REAL,
             stop_loss REAL,
             duration TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(symbol, timeframe)
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     cursor.execute('''
@@ -573,7 +592,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if trade_details.get('pattern'):
                 message += translations['signal_found_pattern'].format(pattern=trade_details['pattern'])
             
-            # Add reason for the signal
             message += translations['signal_reason'].format(
                 daily_trend=reason[0],
                 four_hour_momentum=reason[1],
@@ -777,13 +795,15 @@ def get_sent_signals(symbol, timeframe):
     conn.close()
     return result[0] if result else None
 
-def save_sent_signal(user_id, symbol, timeframe, signal, trade_info):
+def save_sent_signal(symbol, timeframe, signal, trade_info):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
+    cursor.execute('DELETE FROM sent_signals WHERE symbol = ? AND timeframe = ?', (symbol, timeframe))
+    conn.commit()
     cursor.execute('''
         INSERT INTO sent_signals (user_id, symbol, timeframe, signal, entry_price, target1, target2, target3, stop_loss, duration)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, symbol, timeframe, signal, trade_info['entry_price'], trade_info['target1'], trade_info['target2'], trade_info['target3'], trade_info['stop_loss'], trade_info['duration']))
+    ''', (ADMIN_USER_ID, symbol, timeframe, signal, trade_info['entry_price'], trade_info['target1'], trade_info['target2'], trade_info['target3'], trade_info['stop_loss'], trade_info['duration']))
     conn.commit()
     conn.close()
 
@@ -836,44 +856,32 @@ async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: s
 async def monitor_and_find_signals(context: ContextTypes.DEFAULT_TYPE):
     print("Running AI-driven market scan...")
     exchange = ccxt.binance()
+    
+    # Get a list of top traded symbols to monitor
     try:
         tickers = exchange.fetch_tickers()
         high_potential_symbols = []
         for symbol, ticker_data in tickers.items():
-            try:
-                if ticker_data['quote'] == 'USDT' and ticker_data['active'] and ticker_data['quoteVolume'] and ticker_data['percentage']:
-                    if ticker_data['quoteVolume'] > 10000000 and abs(ticker_data['percentage']) > 5:
-                        high_potential_symbols.append(symbol)
-            except (KeyError, TypeError) as e:
-                continue
-        
-        print(f"Found {len(high_potential_symbols)} high potential symbols from quick scan.")
+            if ticker_data['quote'] == 'USDT' and ticker_data['active'] and ticker_data['quoteVolume']:
+                if ticker_data['quoteVolume'] > 10000000:
+                    high_potential_symbols.append(symbol)
+    except Exception as e:
+        print(f"Error fetching symbols: {e}")
+        high_potential_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
-        for symbol in high_potential_symbols:
-            # Check for sudden price changes
-            analyzed_data_1h = fetch_and_analyze_data(symbol=symbol, timeframe='1h')
-            if analyzed_data_1h is not None and not analyzed_data_1h.empty:
-                last_change = analyzed_data_1h.iloc[-1]['change']
-                last_alert_time = get_last_alert_time(symbol)
+    print(f"Found {len(high_potential_symbols)} high potential symbols from quick scan.")
+
+    for symbol in high_potential_symbols:
+        for timeframe in TIMEFRAMES:
+            print(f"Checking for signal for {symbol} on {timeframe} from TradingView...")
+            
+            # Use TradingView signal as the primary filter
+            tradingview_signal = get_tradingview_signal(symbol.replace('/USDT', 'USDT'), timeframe=timeframe)
+            
+            if tradingview_signal in ['BUY', 'SELL']:
+                print(f"TradingView recommended a {tradingview_signal} signal for {symbol} on {timeframe}.")
                 
-                if abs(last_change) >= 10 and (last_alert_time is None or (datetime.datetime.now() - last_alert_time).total_seconds() > 3600):
-                    subscribed_users = get_subscribed_users()
-                    for user_id, lang in subscribed_users:
-                        translations = get_messages(lang)
-                        message = translations['sudden_change_alert'].format(
-                            symbol=symbol,
-                            change=last_change,
-                            price=analyzed_data_1h.iloc[-1]['close']
-                        )
-                        try:
-                            await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
-                        except Exception as e:
-                            print(f"Failed to send sudden change alert to {user_id}: {e}")
-                    save_sent_alert(symbol)
-
-            # Check for trading signals
-            for timeframe in TIMEFRAMES:
-                print(f"Checking for signal for {symbol} on {timeframe}...")
+                # Fetch more data to generate trade info and confirm signal with local analysis
                 data_current = fetch_and_analyze_data(symbol=symbol, timeframe=timeframe)
                 data_4h = fetch_and_analyze_data(symbol=symbol, timeframe='4h')
                 data_1d = fetch_and_analyze_data(symbol=symbol, timeframe='1d')
@@ -882,21 +890,18 @@ async def monitor_and_find_signals(context: ContextTypes.DEFAULT_TYPE):
                     daily_trend, four_hour_momentum = get_trend_strength(data_1d, data_4h)
                     trend_info = (daily_trend, four_hour_momentum)
                     
-                    signal, trade_info = generate_trading_signal(data_current, timeframe, 'ar', trend_info)
+                    # Generate trade info based on the signal and fetched data
+                    trade_info = generate_trade_info(tradingview_signal, data_current.iloc[-1], timeframe, 'ar')
                     
-                    if signal != 'HOLD':
-                        print(f"Found a {signal} signal for {symbol} on {timeframe}.")
+                    if trade_info:
                         last_signal_id = get_sent_signals(symbol, timeframe)
                         if not last_signal_id:
                             for user_id, user_lang in get_subscribed_users():
                                 translations = get_messages(user_lang)
-                                await send_alert(context, user_id, symbol, timeframe, signal, trade_info, user_lang, trend_info)
-                                save_sent_signal(user_id, symbol, timeframe, signal, trade_info)
-                else:
-                    print(f"Skipping {symbol} on {timeframe} due to insufficient data.")
-        
-    except Exception as e:
-        print(f"Error during AI-driven scan: {e}")
+                                await send_alert(context, user_id, symbol, timeframe, tradingview_signal, trade_info, user_lang, trend_info)
+                            save_sent_signal(symbol, timeframe, tradingview_signal, trade_info)
+            else:
+                print(f"TradingView signal for {symbol} on {timeframe} is {tradingview_signal}.")
 
 async def check_new_listings(context: ContextTypes.DEFAULT_TYPE):
     print("Checking for new crypto listings...")
@@ -1010,7 +1015,6 @@ async def daily_market_summary(context: ContextTypes.DEFAULT_TYPE):
 def main():
     setup_database()
 
-    # --- Getting variables from Render's environment ---
     try:
         token = os.getenv('TOKEN')
         admin_user_id = int(os.getenv('ADMIN_USER_ID'))
@@ -1021,7 +1025,6 @@ def main():
         print(f"Error reading environment variables: {e}")
         return
 
-    # Using the variables
     global TOKEN, ADMIN_USER_ID, YOUR_WALLET_ADDRESS
     TOKEN = token
     ADMIN_USER_ID = admin_user_id
