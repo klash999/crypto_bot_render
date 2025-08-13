@@ -26,6 +26,8 @@ SUBSCRIPTION_PRICES = {
     'week': '15 USDT',
     'month': '45 USDT'
 }
+# === أضف اسم المستخدم الخاص بالآدمن هنا ===
+ADMIN_USERNAME = "mohammadksa9" # <---  تم التحديث
 # =================================
 
 # --- Database & Subscription Management ---
@@ -225,6 +227,8 @@ MESSAGES = {
         'analyze_usage': "الرجاء استخدام الأمر بالشكل الصحيح: /analyze [الرمز] [الفاصل الزمني]\nمثال: `/analyze BTCUSDT 4h`",
         'analyze_error': "حدث خطأ أثناء تحليل العملة. يرجى التحقق من الرمز أو الفاصل الزمني والمحاولة مرة أخرى.",
         'analyze_analyzing': "جاري تحليل العملة {symbol} على الفاصل الزمني {timeframe}...",
+        'contact_admin_button': "تواصل مع الآدمن",
+        'admin_contact_info': "للتواصل مع الآدمن، يرجى إرسال رسالة إلى:\n@{admin_username}\n\nيرجى إرسال إيصال الدفع ومعرف المستخدم الخاص بك لتفعيل اشتراكك.",
     },
     'en': {
         'welcome_language_select': "Hello! Please select your language:",
@@ -251,6 +255,8 @@ MESSAGES = {
         'analyze_usage': "Please use the command correctly: /analyze [Symbol] [Timeframe]\nExample: `/analyze BTCUSDT 4h`",
         'analyze_error': "An error occurred while analyzing the symbol. Please check the symbol or timeframe and try again.",
         'analyze_analyzing': "Analyzing symbol {symbol} on timeframe {timeframe}...",
+        'contact_admin_button': "Contact Admin",
+        'admin_contact_info': "To contact the admin, please send a message to:\n@{admin_username}\n\nPlease send your payment receipt and your User ID to activate your subscription.",
     }
 }
 
@@ -331,19 +337,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         translations = get_messages(user_lang)
         welcome_message = translations['welcome']
         
-        if not is_user_subscribed(user_id):
-            welcome_message += translations['subscription_info'].format(
-                binance_wallet_address=BINANCE_WALLET_ADDRESS,
-                price_day=SUBSCRIPTION_PRICES['day'],
-                price_week=SUBSCRIPTION_PRICES['week'],
-                price_month=SUBSCRIPTION_PRICES['month']
-            )
-            keyboard = [[InlineKeyboardButton(translations['subscription_button'], callback_data='show_subscription_info')]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(welcome_message, parse_mode='Markdown', reply_markup=reply_markup)
-        else:
-            await update.message.reply_text(welcome_message, parse_mode='Markdown')
-            await menu_command(update, context)
+        await update.message.reply_text(welcome_message, parse_mode='Markdown')
+        await menu_command(update, context)
 
 async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -446,25 +441,18 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(translations['analyze_usage'])
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This is the corrected line to get the user ID regardless of whether the update is a message or a callback
-    user_id = update.effective_user.id if hasattr(update, 'effective_user') else update.callback_query.from_user.id
-
+    user_id = update.effective_user.id
     lang = get_user_language(user_id)
     translations = get_messages(lang)
     
-    if not is_user_subscribed(user_id):
-        keyboard = [[InlineKeyboardButton(translations['subscription_button'], callback_data='show_subscription_info')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(translations['main_menu_unsubscribed'], reply_markup=reply_markup)
-        return
-
     keyboard = [
         [InlineKeyboardButton(translations['menu_symbols'], callback_data='symbols')],
         [InlineKeyboardButton(translations['menu_timeframes'], callback_data='timeframes')],
+        [InlineKeyboardButton(translations['contact_admin_button'], callback_data='contact_admin')],
     ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(translations['main_menu_subscribed'], reply_markup=reply_markup)
+    await update.effective_message.reply_text(translations['main_menu_subscribed'], reply_markup=reply_markup)
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -478,48 +466,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         translations = get_messages(lang_code)
         welcome_message = translations['welcome']
         
-        if not is_user_subscribed(user_id):
-            welcome_message += translations['subscription_info'].format(
-                binance_wallet_address=BINANCE_WALLET_ADDRESS,
-                price_day=SUBSCRIPTION_PRICES['day'],
-                price_week=SUBSCRIPTION_PRICES['week'],
-                price_month=SUBSCRIPTION_PRICES['month']
-            )
-            keyboard = [[InlineKeyboardButton(translations['subscription_button'], callback_data='show_subscription_info')]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            try:
-                await query.edit_message_text(welcome_message, parse_mode='Markdown', reply_markup=reply_markup)
-            except telegram.error.BadRequest as e:
-                if "Message is not modified" not in str(e):
-                    raise e
-        else:
-            try:
-                await query.edit_message_text(welcome_message, parse_mode='Markdown')
-                await menu_command(update, context) # Changed to pass update, not query
-            except telegram.error.BadRequest as e:
-                if "Message is not modified" not in str(e):
-                    raise e
-        return
-
-    lang = get_user_language(user_id)
-    translations = get_messages(lang)
-
-    if query.data == 'show_subscription_info':
-        welcome_message = translations['welcome']
-        welcome_message += translations['subscription_info'].format(
-            binance_wallet_address=BINANCE_WALLET_ADDRESS,
-            price_day=SUBSCRIPTION_PRICES['day'],
-            price_week=SUBSCRIPTION_PRICES['week'],
-            price_month=SUBSCRIPTION_PRICES['month']
-        )
         try:
             await query.edit_message_text(welcome_message, parse_mode='Markdown')
+            await menu_command(update, context)
         except telegram.error.BadRequest as e:
             if "Message is not modified" not in str(e):
                 raise e
         return
+    
+    lang = get_user_language(user_id)
+    translations = get_messages(lang)
 
-    if not is_user_subscribed(user_id):
+    if query.data == 'contact_admin':
+        await query.message.reply_text(translations['admin_contact_info'].format(admin_username=ADMIN_USERNAME), parse_mode='Markdown')
+        return
+
+    if not is_user_subscribed(user_id) and query.data not in ['back_to_menu', 'symbols', 'timeframes']:
         keyboard = [[InlineKeyboardButton(translations['subscription_button'], callback_data='show_subscription_info')]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.reply_text(translations['main_menu_unsubscribed'], reply_markup=reply_markup)
@@ -530,11 +492,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'timeframes':
         await show_timeframes_menu(query, translations)
     elif query.data.startswith('toggle_symbol_'):
+        if not is_user_subscribed(user_id):
+            await query.message.reply_text(translations['main_menu_unsubscribed'])
+            return
         await toggle_symbol(query, translations)
     elif query.data.startswith('toggle_timeframe_'):
+        if not is_user_subscribed(user_id):
+            await query.message.reply_text(translations['main_menu_unsubscribed'])
+            return
         await toggle_timeframe(query, translations)
     elif query.data == 'back_to_menu':
-        await menu_command(update, context) # Changed to pass update, not query
+        await menu_command(update, context)
 
 async def show_symbols_menu(query, translations):
     user_id = query.from_user.id
