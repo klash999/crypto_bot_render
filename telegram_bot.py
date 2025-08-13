@@ -9,6 +9,7 @@ import datetime
 import math
 import feedparser
 import os
+import requests
 
 # --- Trading Logic and Analysis ---
 def fetch_and_analyze_data(symbol, timeframe='1h', limit=200):
@@ -20,6 +21,7 @@ def fetch_and_analyze_data(symbol, timeframe='1h', limit=200):
         df['close'] = pd.to_numeric(df['close'])
         df['high'] = pd.to_numeric(df['high'])
         df['low'] = pd.to_numeric(df['low'])
+        df['volume'] = pd.to_numeric(df['volume'])
         
         df['rsi'] = talib.RSI(df['close'], timeperiod=14)
         macd_output = talib.MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
@@ -27,11 +29,15 @@ def fetch_and_analyze_data(symbol, timeframe='1h', limit=200):
         df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
         df['sma200'] = talib.SMA(df['close'], timeperiod=200)
         
+        df['bb_upper'], df['bb_middle'], df['bb_lower'] = talib.BBANDS(df['close'], timeperiod=20)
+
         stoch_k, stoch_d = talib.STOCH(df['high'], df['low'], df['close'], 
                                        fastk_period=14, slowk_period=3, 
                                        slowd_period=3, slowk_matype=0, slowd_matype=0)
         df['stoch_k'] = stoch_k
         df['stoch_d'] = stoch_d
+        
+        df['change'] = df['close'].pct_change() * 100
         
         df = df.dropna().reset_index(drop=True)
         return df
@@ -68,11 +74,11 @@ def analyze_patterns(data):
 def generate_trade_info(signal, latest_data, timeframe, lang):
     translations = {
         'ar': {
-            'duration_map': {'1m': 'دقائق قليلة', '5m': 'بضع ساعات', '15m': 'عدة ساعات', '1h': 'يوم أو أكثر', '4h': 'عدة أيام'},
+            'duration_map': {'15m': 'عدة ساعات', '1h': 'يوم أو أكثر', '4h': 'عدة أيام'},
             'undefined_duration': 'غير محدد'
         },
         'en': {
-            'duration_map': {'1m': 'A few minutes', '5m': 'A few hours', '15m': 'Several hours', '1h': 'A day or more', '4h': 'Several days'},
+            'duration_map': {'15m': 'Several hours', '1h': 'A day or more', '4h': 'Several days'},
             'undefined_duration': 'Undefined'
         }
     }
@@ -107,20 +113,57 @@ def generate_trade_info(signal, latest_data, timeframe, lang):
         'duration': duration
     }
 
-def generate_trading_signal(analyzed_data, timeframe, lang):
+def get_trend_strength(data_1d, data_4h):
+    # Trend based on SMA 200 on daily chart
+    if data_1d is not None and len(data_1d) >= 200:
+        if data_1d.iloc[-1]['close'] > data_1d.iloc[-1]['sma200']:
+            daily_trend = 'صاعد'
+        elif data_1d.iloc[-1]['close'] < data_1d.iloc[-1]['sma200']:
+            daily_trend = 'هابط'
+        else:
+            daily_trend = 'محايد'
+    else:
+        daily_trend = 'غير محدد'
+
+    # Momentum based on RSI on 4h chart
+    if data_4h is not None and len(data_4h) > 1:
+        if data_4h.iloc[-1]['rsi'] > 50:
+            four_hour_momentum = 'صعودي'
+        elif data_4h.iloc[-1]['rsi'] < 50:
+            four_hour_momentum = 'هبوطي'
+        else:
+            four_hour_momentum = 'محايد'
+    else:
+        four_hour_momentum = 'غير محدد'
+        
+    return daily_trend, four_hour_momentum
+
+def generate_trading_signal(analyzed_data, timeframe, lang, trend_info):
     latest_data = analyzed_data.iloc[-1]
     latest_rsi = latest_data['rsi']
     latest_macd_hist = latest_data['macd_hist']
     latest_stoch_k = latest_data['stoch_k']
     
+    daily_trend, four_hour_momentum = trend_info
+    
     signal = 'HOLD'
     pattern_signal, pattern_name = analyze_patterns(analyzed_data)
 
-    if latest_rsi < 35 or latest_macd_hist > 0 or latest_stoch_k < 20:
-        signal = 'BUY'
-    elif latest_rsi > 65 or latest_macd_hist < 0 or latest_stoch_k > 80:
-        signal = 'SELL'
+    # Main Strategy Logic - Combining Indicators and Multi-Timeframe Analysis
+    if daily_trend == 'صاعد' and four_hour_momentum != 'هبوطي':
+        # Look for BUY signals in a bullish trend
+        if (latest_rsi < 35 or latest_stoch_k < 20) and latest_data['close'] < latest_data['bb_lower']:
+            signal = 'BUY'
+        elif latest_macd_hist > 0 and latest_data['volume'] > latest_data['volume'].mean() * 1.5:
+            signal = 'BUY'
     
+    elif daily_trend == 'هابط' and four_hour_momentum != 'صعودي':
+        # Look for SELL signals in a bearish trend
+        if (latest_rsi > 65 or latest_stoch_k > 80) and latest_data['close'] > latest_data['bb_upper']:
+            signal = 'SELL'
+        elif latest_macd_hist < 0 and latest_data['volume'] > latest_data['volume'].mean() * 1.5:
+            signal = 'SELL'
+
     if pattern_signal is not None:
         signal = pattern_signal
 
@@ -163,7 +206,8 @@ def setup_database():
             target3 REAL,
             stop_loss REAL,
             duration TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(symbol, timeframe)
         )
     ''')
     cursor.execute('''
@@ -178,16 +222,23 @@ def setup_database():
             title TEXT UNIQUE
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sent_alerts (
+            alert_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
 
 def get_subscribed_users():
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute('SELECT user_id FROM users WHERE is_subscribed = 1')
+    cursor.execute('SELECT user_id, language FROM users WHERE is_subscribed = 1')
     results = cursor.fetchall()
     conn.close()
-    return [result[0] for result in results]
+    return results
 
 def is_user_subscribed(user_id):
     conn = sqlite3.connect(DATABASE_NAME)
@@ -247,14 +298,12 @@ SUBSCRIPTION_PACKAGES = {
 
 MESSAGES = {
     'ar': {
-        'start_welcome': "مرحباً بك! أنا بوت تداول العملات الرقمية الخاص بك.",
+        'start_welcome': "مرحباً بك! أنا بوت تداول العملات الرقمية الخاص بك. 🤖",
         'start_features': (
-            "يقدم البوت الميزات التالية:\n"
-            "- **إشارات تداول** فورية للفرص الواعدة في السوق بالكامل.\n"
-            "- **تنبيهات بالاكتتابات** الجديدة على منصة Binance.\n"
-            "- **أهم الأخبار** المباشرة في سوق العملات الرقمية.\n"
-            "- **تحليل فني** دقيق للعملات عند الطلب.\n"
-            "- **نظام اشتراكات** سهل ومرن للوصول الكامل للميزات."
+            "أهلاً بك في القائمة الرئيسية. اختر ما تريد فعله: 👇\n\n"
+            "**إشارات تداول** 📈\n"
+            "**تحليل عملة** 📊\n"
+            "**ملخص السوق** 📰"
         ),
         'choose_lang': "يرجى اختيار لغتك المفضلة:",
         'main_menu': "أهلاً بك في القائمة الرئيسية. اختر ما تريد فعله:",
@@ -262,37 +311,48 @@ MESSAGES = {
         'signal': "إشارة تداول",
         'analyze_symbol': "تحليل عملة",
         'subscribe': "اشتراك",
+        'quick_analyze': "تحليل سريع لـ {symbol}",
         'subscribe_info': (
-            "اختر باقة الاشتراك المناسبة لك:\n\n"
+            "اختر باقة الاشتراك المناسبة لك: 👇\n\n"
             "**{daily_name}**: {daily_price}\n"
             "**{weekly_name}**: {weekly_price}\n"
             "**{monthly_name}**: {monthly_price}\n\n"
             "للاشتراك، قم بتحويل المبلغ إلى عنوان المحفظة التالي:\n\n`{wallet_address}`\n\n"
-            "بعد التحويل، أرسل إثبات الدفع (صورة) إلى الآدمن عبر الرسائل الخاصة.\n"
+            "بعد التحويل، أرسل إثبات الدفع (صورة) إلى الآدمن عبر الرسائل الخاصة. 💬\n"
             "رابط الآدمن: [الآدمن](tg://user?id={admin_id})"
         ),
-        'unsubscribed_msg': "عذراً، هذه الميزة متاحة للمشتركين فقط. يرجى الاشتراك للوصول الكامل.",
+        'unsubscribed_msg': "عذراً، هذه الميزة متاحة للمشتركين فقط. 🛑 يرجى الاشتراك للوصول الكامل.",
         'analyzing': "جاري تحليل السوق...",
-        'platform_error': "عذرًا، حدث خطأ أثناء الاتصال بالمنصة. يرجى المحاولة لاحقًا.",
+        'platform_error': "عذرًا، حدث خطأ أثناء الاتصال بالمنصة. ⚠️ يرجى المحاولة لاحقًا.",
         'signal_found': (
             "التحليل مكتمل. إشارة التداول الحالية لـ **{symbol}** هي: **{signal}**\n\n"
-            "**تفاصيل الصفقة:**\n- **فاصل زمني:** 1 ساعة\n- **سعر الدخول:** {entry_price:.2f}\n"
-            "- **وقف الخسارة:** {stop_loss:.2f}\n- **الهدف 1:** {target1:.2f}\n"
-            "- **الهدف 2:** {target2:.2f}\n- **الهدف 3:** {target3:.2f}\n"
+            "**تفاصيل الصفقة:**\n"
+            "- **فاصل زمني:** {timeframe}\n"
+            "- **سعر الدخول:** {entry_price:.2f}\n"
+            "- **وقف الخسارة:** {stop_loss:.2f}\n"
+            "- **الهدف 1:** {target1:.2f}\n"
+            "- **الهدف 2:** {target2:.2f}\n"
+            "- **الهدف 3:** {target3:.2f}\n"
             "- **مدة الصفقة المتوقعة:** {duration}"
         ),
         'signal_found_pattern': "\n- **النموذج:** {pattern}",
-        'no_signal': "عذرًا، لم يتم العثور على أي فرصة تداول واعدة في السوق حالياً.",
+        'signal_reason': (
+            "\n\n**لماذا هذه الإشارة؟**\n"
+            "- **الاتجاه العام:** {daily_trend} (1 يوم)\n"
+            "- **زخم السوق:** {four_hour_momentum} (4 ساعات)\n"
+            "- **تأكيد المؤشرات:** مؤشر {indicator1} ومؤشر {indicator2} يؤكدان الإشارة."
+        ),
+        'no_signal': "عذرًا، لم يتم العثور على أي فرصة تداول واعدة في السوق حالياً. 😔",
         'waiting_for_symbol': "من فضلك أرسل لي رمز العملة التي تريد تحليلها (مثال: ETHUSDT).",
-        'invalid_symbol': "عذراً، هذا ليس رمز عملة صالح. يرجى إرسال رمز مثل `ETHUSDT`.",
-        'analysis_complete_hold': "التحليل مكتمل. إشارة التداول الحالية لـ **{symbol}** هي: **HOLD**",
-        'analysis_error': "عذرًا، لا يمكن تحليل عملة **{symbol}**. تأكد من أن الرمز صحيح.",
-        'admin_only': "عذراً، هذا الأمر مخصص للآدمن فقط.",
-        'activate_success': "تم تفعيل اشتراك المستخدم {user_id} بنجاح.",
-        'deactivate_success': "تم إلغاء اشتراك المستخدم {user_id} بنجاح.",
+        'invalid_symbol': "عذراً، هذا ليس رمز عملة صالح. ❌ يرجى إرسال رمز مثل `ETHUSDT`.",
+        'analysis_complete_hold': "التحليل مكتمل. إشارة التداول الحالية لـ **{symbol}** هي: **HOLD** ⏳",
+        'analysis_error': "عذرًا، لا يمكن تحليل عملة **{symbol}**. تأكد من أن الرمز صحيح. 😔",
+        'admin_only': "عذراً، هذا الأمر مخصص للآدمن فقط. 🛡️",
+        'activate_success': "✅ تم تفعيل اشتراك المستخدم {user_id} بنجاح.",
+        'deactivate_success': "🚫 تم إلغاء اشتراك المستخدم {user_id} بنجاح.",
         'status_msg': "حالة المستخدم {user_id}: {status}",
         'invalid_command': "الرجاء استخدام الأمر بالشكل الصحيح: {command}",
-        'not_found': "المستخدم غير موجود.",
+        'not_found': "المستخدم غير موجود. 🤷‍♂️",
         'new_listing_alert': "🆕 **تنبيه اكتتاب جديد!** 🆕\n\nتم إدراج عملات جديدة في منصة التداول. إليك الرموز:\n\n",
         'news_alert': "📰 **خبر عاجل!** 📰\n\n**{title}**\n\n[اقرأ المزيد]({link})",
         'proactive_alert': (
@@ -309,72 +369,49 @@ MESSAGES = {
             "- **مدة الصفقة المتوقعة:** {duration}\n"
         ),
         'proactive_alert_pattern': "- **النموذج:** {pattern}\n",
-        'real_time_analysis': "\nتحليل السوق في الوقت الفعلي."
-    },
-    'en': {
-        'start_welcome': "Hello! I am your cryptocurrency trading bot.",
-        'start_features': (
-            "The bot offers the following features:\n"
-            "- **Trading signals** for promising opportunities in the market.\n"
-            "- **New listing alerts** on the Binance platform.\n"
-            "- **Breaking news** in the crypto market.\n"
-            "- **Technical analysis** for any coin upon request.\n"
-            "- **Flexible subscription system** for full access to all features."
+        'proactive_alert_reason': (
+            "\n**لماذا هذه الإشارة؟**\n"
+            "- **الاتجاه العام:** {daily_trend} (1 يوم)\n"
+            "- **زخم السوق:** {four_hour_momentum} (4 ساعات)\n"
+            "- **تأكيد المؤشرات:** مؤشر {indicator1} ومؤشر {indicator2} يؤكدان الإشارة."
         ),
-        'choose_lang': "Please choose your preferred language:",
-        'main_menu': "Welcome to the main menu. Please choose what you want to do:",
-        'back_to_menu': "Back to Main Menu",
-        'signal': "Trading Signal",
-        'analyze_symbol': "Analyze Symbol",
-        'subscribe': "Subscribe",
-        'subscribe_info': (
-            "Choose your subscription package:\n\n"
-            "**{daily_name}**: {daily_price}\n"
-            "**{weekly_name}**: {weekly_price}\n"
-            "**{monthly_name}**: {monthly_price}\n\n"
-            "To subscribe, transfer the amount to the following wallet address:\n\n`{wallet_address}`\n\n"
-            "After the transfer, send a proof of payment (screenshot) to the admin via private message.\n"
-            "Admin Link: [Admin](tg://user?id={admin_id})"
+        'real_time_analysis': "\nتحليل السوق في الوقت الفعلي.",
+        'compare_symbols': "جاري مقارنة {symbol1} و {symbol2}...",
+        'compare_result': (
+            "📊 **مقارنة الأداء:** {symbol1} مقابل {symbol2}\n\n"
+            "**{symbol1}**:\n"
+            "- **السعر الحالي:** {price1:.2f}\n"
+            "- **تغير 24 ساعة:** {change1:.2f}%\n\n"
+            "**{symbol2}**:\n"
+            "- **السعر الحالي:** {price2:.2f}\n"
+            "- **تغير 24 ساعة:** {change2:.2f}%\n\n"
+            "**ملخص:** {summary}"
         ),
-        'unsubscribed_msg': "Sorry, this feature is for subscribers only. Please subscribe for full access.",
-        'analyzing': "Analyzing the market...",
-        'platform_error': "Sorry, an error occurred while connecting to the platform. Please try again later.",
-        'signal_found': (
-            "Analysis complete. The current trading signal for **{symbol}** is: **{signal}**\n\n"
-            "**Trade Details:**\n- **Timeframe:** 1 hour\n- **Entry Price:** {entry_price:.2f}\n"
-            "- **Stop Loss:** {stop_loss:.2f}\n- **Target 1:** {target1:.2f}\n"
-            "- **Target 2:** {target2:.2f}\n- **Target 3:** {target3:.2f}\n"
-            "- **Expected Duration:** {duration}"
+        'summary_positive': "أداء {winner} كان أفضل بكثير في الـ 24 ساعة الماضية. 🚀",
+        'summary_negative': "أداء {loser} كان الأضعف في الـ 24 ساعة الماضية. 📉",
+        'summary_equal': "أداء العملتين كان متقاربًا في الـ 24 ساعة الماضية. 🤝",
+        'market_summary_title': "📈 **ملخص السوق اليومي** 📉",
+        'market_summary_content': (
+            "أهم 3 عملات صاعدة في آخر 24 ساعة: 🚀\n"
+            "{top_gainers}\n\n"
+            "أهم 3 عملات هابطة في آخر 24 ساعة: 📉\n"
+            "{top_losers}"
         ),
-        'signal_found_pattern': "\n- **Pattern:** {pattern}",
-        'no_signal': "Sorry, no promising trading opportunities were found in the market at the moment.",
-        'waiting_for_symbol': "Please send me the coin symbol you want to analyze (e.g., ETHUSDT).",
-        'invalid_symbol': "Sorry, this is not a valid coin symbol. Please send a symbol like `ETHUSDT`.",
-        'analysis_complete_hold': "Analysis complete. The current trading signal for **{symbol}** is: **HOLD**",
-        'analysis_error': "Sorry, cannot analyze the symbol **{symbol}**. Make sure the symbol is correct.",
-        'admin_only': "Sorry, this command is for the admin only.",
-        'activate_success': "Subscription for user {user_id} activated successfully.",
-        'deactivate_success': "Subscription for user {user_id} deactivated successfully.",
-        'status_msg': "Status for user {user_id}: {status}",
-        'invalid_command': "Please use the command correctly: {command}",
-        'not_found': "User not found.",
-        'new_listing_alert': "🆕 **New Listing Alert!** 🆕\n\nNew coins have been listed on the trading platform. Here are the symbols:\n\n",
-        'news_alert': "📰 **Breaking News!** 📰\n\n**{title}**\n\n[Read More]({link})",
-        'proactive_alert': (
-            "🚨 **New Trading Signal!** 🚨\n\n"
-            "**Coin:** {symbol}\n"
-            "**Signal:** {signal}\n\n"
-            "**Trade Details:**\n"
-            "- **Timeframe:** {timeframe}\n"
-            "- **Entry Price:** {entry_price:.2f}\n"
-            "- **Stop Loss:** {stop_loss:.2f}\n"
-            "- **Target 1:** {target1:.2f}\n"
-            "- **Target 2:** {target2:.2f}\n"
-            "- **Target 3:** {target3:.2f}\n"
-            "- **Expected Duration:** {duration}\n"
+        'sudden_change_alert': (
+            "🚨 **تنبيه حركة سعر مفاجئة!** 🚨\n\n"
+            "عملة **{symbol}** شهدت تغيرًا كبيرًا في السعر بنسبة **{change:.2f}%** خلال الساعة الماضية.\n"
+            "**السعر الحالي:** {price:.2f}"
         ),
-        'proactive_alert_pattern': "- **Pattern:** {pattern}\n",
-        'real_time_analysis': "\nReal-time market analysis."
+        'explain_indicators_button': "ما هي المؤشرات؟ 🤔",
+        'indicators_explanation': (
+            "شرح المؤشرات الفنية:\n\n"
+            "**RSI (مؤشر القوة النسبية):**\n"
+            "يُستخدم لقياس سرعة وتغير حركات الأسعار. إذا كان المؤشر أقل من 30، فقد يعني ذلك أن العملة في منطقة ذروة بيع (Oversold). إذا كان أعلى من 70، فقد يعني أنها في منطقة ذروة شراء (Overbought).\n\n"
+            "**MACD (التقارب والتباعد):**\n"
+            "يُظهر العلاقة بين متوسطي السعر المتحرك. عندما يتجاوز خط MACD خط الإشارة، فذلك يعني زخمًا صعوديًا. وعندما ينزل تحته، فذلك يعني زخمًا هبوطيًا.\n\n"
+            "**ATR (متوسط المدى الحقيقي):**\n"
+            "يُستخدم لقياس تقلبات السوق. كلما زادت قيمة ATR، زادت تقلبات العملة."
+        ),
     }
 }
 
@@ -386,6 +423,16 @@ def get_main_keyboard(lang):
     keyboard = [
         [InlineKeyboardButton(translations['signal'], callback_data='signal')],
         [InlineKeyboardButton(translations['analyze_symbol'], callback_data='analyze_symbol')],
+        [
+            InlineKeyboardButton(translations['quick_analyze'].format(symbol='BTCUSDT'), callback_data='quick_analyze_BTCUSDT'),
+            InlineKeyboardButton(translations['quick_analyze'].format(symbol='ETHUSDT'), callback_data='quick_analyze_ETHUSDT'),
+            InlineKeyboardButton(translations['quick_analyze'].format(symbol='BNBUSDT'), callback_data='quick_analyze_BNBUSDT'),
+        ],
+        [
+            InlineKeyboardButton(translations['quick_analyze'].format(symbol='SOLUSDT'), callback_data='quick_analyze_SOLUSDT'),
+            InlineKeyboardButton(translations['quick_analyze'].format(symbol='ADAUSDT'), callback_data='quick_analyze_ADAUSDT'),
+            InlineKeyboardButton(translations['quick_analyze'].format(symbol='XRPUSDT'), callback_data='quick_analyze_XRPUSDT'),
+        ],
         [InlineKeyboardButton(translations['subscribe'], callback_data='subscribe')]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -402,9 +449,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Please choose your language: / من فضلك اختر لغتك:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    query = update.callback_query
-    await query.answer()
+    user_id = update.callback_query.from_user.id if update.callback_query else update.effective_user.id
+    if update.callback_query:
+        await update.callback_query.answer()
     
     if user_id in user_state:
         del user_state[user_id]
@@ -413,7 +460,10 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     translations = get_messages(lang)
     features_message = translations['start_features']
     
-    await query.edit_message_text(features_message, reply_markup=get_main_keyboard(lang))
+    if update.callback_query:
+        await update.callback_query.edit_message_text(features_message, reply_markup=get_main_keyboard(lang))
+    else:
+        await update.message.reply_text(features_message, reply_markup=get_main_keyboard(lang))
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -447,7 +497,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(message, parse_mode='Markdown', disable_web_page_preview=True, reply_markup=reply_markup)
-
+    
+    elif callback_data.startswith('quick_analyze_'):
+        if not is_user_subscribed(user_id):
+            keyboard = [[InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')]]
+            await query.edit_message_text(translations['unsubscribed_msg'], reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        
+        symbol = callback_data.split('_')[2]
+        await analyze_symbol_on_demand(update, context, symbol, lang)
+        
     elif callback_data == 'signal':
         if not is_user_subscribed(user_id):
             keyboard = [[InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')]]
@@ -473,23 +532,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
 
         selected_symbol = None
+        selected_timeframe = None
         for symbol in high_potential_symbols:
-            try:
-                data = fetch_and_analyze_data(symbol=symbol, timeframe='1h')
-                if data is not None and not data.empty:
-                    signal, trade_info = generate_trading_signal(data, '1h', lang)
-                    if signal != 'HOLD' and trade_info:
-                        selected_symbol = symbol
-                        trade_details = trade_info
-                        break
-            except Exception as e:
-                print(f"Error checking {symbol}: {e}")
-                continue
+            for timeframe in ['15m', '1h']:
+                try:
+                    data_current = fetch_and_analyze_data(symbol=symbol, timeframe=timeframe)
+                    data_4h = fetch_and_analyze_data(symbol=symbol, timeframe='4h')
+                    data_1d = fetch_and_analyze_data(symbol=symbol, timeframe='1d')
+                    
+                    if all(d is not None and not d.empty for d in [data_current, data_4h, data_1d]):
+                        daily_trend, four_hour_momentum = get_trend_strength(data_1d, data_4h)
+                        trend_info = (daily_trend, four_hour_momentum)
+                        
+                        signal, trade_info = generate_trading_signal(data_current, timeframe, lang, trend_info)
+                        
+                        if signal != 'HOLD' and trade_info:
+                            selected_symbol = symbol
+                            selected_timeframe = timeframe
+                            trade_details = trade_info
+                            reason = trend_info
+                            break
+                except Exception as e:
+                    print(f"Error checking {symbol} on {timeframe}: {e}")
+                    continue
+            if selected_symbol:
+                break
         
         if selected_symbol:
             message = translations['signal_found'].format(
                 symbol=selected_symbol,
                 signal=trade_details['signal'],
+                timeframe=selected_timeframe,
                 entry_price=trade_details['entry_price'],
                 stop_loss=trade_details['stop_loss'],
                 target1=trade_details['target1'],
@@ -499,8 +572,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             if trade_details.get('pattern'):
                 message += translations['signal_found_pattern'].format(pattern=trade_details['pattern'])
+            
+            # Add reason for the signal
+            message += translations['signal_reason'].format(
+                daily_trend=reason[0],
+                four_hour_momentum=reason[1],
+                indicator1="MACD",
+                indicator2="RSI"
+            )
 
-            keyboard = [[InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')]]
+            keyboard = [
+                [InlineKeyboardButton(translations['explain_indicators_button'], callback_data='explain_indicators')],
+                [InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')]
+            ]
             await query.edit_message_text(message, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
         else:
             keyboard = [[InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')]]
@@ -519,6 +603,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif callback_data == 'back_to_menu':
         await back_to_menu(update, context)
+    
+    elif callback_data == 'explain_indicators':
+        await query.edit_message_text(translations['indicators_explanation'], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')]]))
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -539,32 +627,98 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def analyze_symbol_on_demand(update: Update, context: ContextTypes.DEFAULT_TYPE, symbol: str, lang):
     translations = get_messages(lang)
-    await update.message.reply_text(f"**{translations['analyzing']}** {symbol.upper()}...", parse_mode='Markdown')
-    data = fetch_and_analyze_data(symbol=symbol.upper(), timeframe='1h')
-    
-    if data is not None:
-        signal, trade_info = generate_trading_signal(data, '1h', lang)
-        if signal != 'HOLD' and trade_info:
-            message = translations['signal_found'].format(
-                symbol=symbol.upper(),
-                signal=signal,
-                entry_price=trade_info['entry_price'],
-                stop_loss=trade_info['stop_loss'],
-                target1=trade_info['target1'],
-                target2=trade_info['target2'],
-                target3=trade_info['target3'],
-                duration=trade_info['duration']
-            )
-            if trade_info.get('pattern'):
-                message += translations['signal_found_pattern'].format(pattern=trade_info['pattern'])
-        else:
-            message = translations['analysis_complete_hold'].format(symbol=symbol.upper())
+    try:
+        await update.message.reply_text(f"**{translations['analyzing']}** {symbol.upper()}...", parse_mode='Markdown')
         
-        keyboard = [[InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')]]
-        await update.message.reply_text(message, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
+        data_15m = fetch_and_analyze_data(symbol=symbol.upper(), timeframe='15m')
+        data_1h = fetch_and_analyze_data(symbol=symbol.upper(), timeframe='1h')
+        data_4h = fetch_and_analyze_data(symbol=symbol.upper(), timeframe='4h')
+        data_1d = fetch_and_analyze_data(symbol=symbol.upper(), timeframe='1d')
+        
+        if data_15m is not None and not data_15m.empty and data_4h is not None and not data_4h.empty and data_1d is not None and not data_1d.empty:
+            daily_trend, four_hour_momentum = get_trend_strength(data_1d, data_4h)
+            trend_info = (daily_trend, four_hour_momentum)
+            
+            signal, trade_info = generate_trading_signal(data_15m, '15m', lang, trend_info)
+            if signal != 'HOLD' and trade_info:
+                message = translations['signal_found'].format(
+                    symbol=symbol.upper(),
+                    signal=signal,
+                    timeframe='15m',
+                    entry_price=trade_info['entry_price'],
+                    stop_loss=trade_info['stop_loss'],
+                    target1=trade_info['target1'],
+                    target2=trade_info['target2'],
+                    target3=trade_info['target3'],
+                    duration=trade_info['duration']
+                )
+                if trade_info.get('pattern'):
+                    message += translations['signal_found_pattern'].format(pattern=trade_info['pattern'])
+                
+                message += translations['signal_reason'].format(
+                    daily_trend=daily_trend,
+                    four_hour_momentum=four_hour_momentum,
+                    indicator1="MACD",
+                    indicator2="RSI"
+                )
+            else:
+                message = translations['analysis_complete_hold'].format(symbol=symbol.upper())
+            
+            keyboard = [
+                [InlineKeyboardButton(translations['explain_indicators_button'], callback_data='explain_indicators')],
+                [InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')]
+            ]
+            await update.message.reply_text(message, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            keyboard = [[InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')]]
+            await update.message.reply_text(translations['analysis_error'].format(symbol=symbol.upper()), reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        print(f"Error in analyze_symbol_on_demand: {e}")
         keyboard = [[InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')]]
         await update.message.reply_text(translations['analysis_error'].format(symbol=symbol.upper()), reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    translations = get_messages(lang)
+
+    if not is_user_subscribed(user_id):
+        await update.message.reply_text(translations['unsubscribed_msg'])
+        return
+    
+    try:
+        symbol1 = context.args[0].upper()
+        symbol2 = context.args[1].upper()
+        await update.message.reply_text(translations['compare_symbols'].format(symbol1=symbol1, symbol2=symbol2), parse_mode='Markdown')
+        
+        data1 = fetch_and_analyze_data(symbol1, '1d', 2)
+        data2 = fetch_and_analyze_data(symbol2, '1d', 2)
+
+        if data1 is not None and not data1.empty and data2 is not None and not data2.empty:
+            price1 = data1.iloc[-1]['close']
+            change1 = data1.iloc[-1]['change']
+            
+            price2 = data2.iloc[-1]['close']
+            change2 = data2.iloc[-1]['change']
+            
+            if change1 > change2:
+                summary = translations['summary_positive'].format(winner=symbol1)
+            elif change2 > change1:
+                summary = translations['summary_positive'].format(winner=symbol2)
+            else:
+                summary = translations['summary_equal']
+            
+            message = translations['compare_result'].format(
+                symbol1=symbol1, price1=price1, change1=change1,
+                symbol2=symbol2, price2=price2, change2=change2,
+                summary=summary
+            )
+            await update.message.reply_text(message, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(translations['analysis_error'].format(symbol=f"{symbol1} / {symbol2}"))
+    except (IndexError, ValueError):
+        await update.message.reply_text(translations['invalid_command'].format(command="/compare [symbol1] [symbol2]"))
+
 
 # --- Admin Commands ---
 async def activate_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -613,7 +767,7 @@ async def check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(translations['invalid_command'].format(command="/admin_status [user_id]"))
 
 # --- Proactive Alerting System ---
-TIMEFRAMES = ['1h']
+TIMEFRAMES = ['15m', '1h']
 
 def get_sent_signals(symbol, timeframe):
     conn = sqlite3.connect(DATABASE_NAME)
@@ -633,7 +787,24 @@ def save_sent_signal(user_id, symbol, timeframe, signal, trade_info):
     conn.commit()
     conn.close()
 
-async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: str, timeframe: str, signal: str, trade_info: dict, lang: str):
+def get_last_alert_time(symbol):
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('SELECT MAX(timestamp) FROM sent_alerts WHERE symbol = ?', (symbol,))
+    result = cursor.fetchone()
+    conn.close()
+    if result and result[0]:
+        return datetime.datetime.fromisoformat(result[0])
+    return None
+
+def save_sent_alert(symbol):
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('INSERT INTO sent_alerts (symbol) VALUES (?)', (symbol,))
+    conn.commit()
+    conn.close()
+
+async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: str, timeframe: str, signal: str, trade_info: dict, lang: str, reason: tuple):
     translations = get_messages(lang)
     message = translations['proactive_alert'].format(
         symbol=symbol,
@@ -648,7 +819,13 @@ async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: s
     )
     if trade_info.get('pattern'):
         message += translations['proactive_alert_pattern'].format(pattern=trade_info['pattern'])
-    message += translations['real_time_analysis']
+    
+    message += translations['proactive_alert_reason'].format(
+        daily_trend=reason[0],
+        four_hour_momentum=reason[1],
+        indicator1="MACD",
+        indicator2="RSI"
+    )
 
     try:
         await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
@@ -673,20 +850,50 @@ async def monitor_and_find_signals(context: ContextTypes.DEFAULT_TYPE):
         print(f"Found {len(high_potential_symbols)} high potential symbols from quick scan.")
 
         for symbol in high_potential_symbols:
-            for timeframe in TIMEFRAMES:
-                analyzed_data = fetch_and_analyze_data(symbol=symbol, timeframe=timeframe)
+            # Check for sudden price changes
+            analyzed_data_1h = fetch_and_analyze_data(symbol=symbol, timeframe='1h')
+            if analyzed_data_1h is not None and not analyzed_data_1h.empty:
+                last_change = analyzed_data_1h.iloc[-1]['change']
+                last_alert_time = get_last_alert_time(symbol)
                 
-                if analyzed_data is not None and not analyzed_data.empty:
-                    lang = 'ar'  # Default language for proactive alerts
-                    signal, trade_info = generate_trading_signal(analyzed_data, timeframe, lang)
+                if abs(last_change) >= 10 and (last_alert_time is None or (datetime.datetime.now() - last_alert_time).total_seconds() > 3600):
+                    subscribed_users = get_subscribed_users()
+                    for user_id, lang in subscribed_users:
+                        translations = get_messages(lang)
+                        message = translations['sudden_change_alert'].format(
+                            symbol=symbol,
+                            change=last_change,
+                            price=analyzed_data_1h.iloc[-1]['close']
+                        )
+                        try:
+                            await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
+                        except Exception as e:
+                            print(f"Failed to send sudden change alert to {user_id}: {e}")
+                    save_sent_alert(symbol)
+
+            # Check for trading signals
+            for timeframe in TIMEFRAMES:
+                print(f"Checking for signal for {symbol} on {timeframe}...")
+                data_current = fetch_and_analyze_data(symbol=symbol, timeframe=timeframe)
+                data_4h = fetch_and_analyze_data(symbol=symbol, timeframe='4h')
+                data_1d = fetch_and_analyze_data(symbol=symbol, timeframe='1d')
+                
+                if all(d is not None and not d.empty for d in [data_current, data_4h, data_1d]):
+                    daily_trend, four_hour_momentum = get_trend_strength(data_1d, data_4h)
+                    trend_info = (daily_trend, four_hour_momentum)
+                    
+                    signal, trade_info = generate_trading_signal(data_current, timeframe, 'ar', trend_info)
                     
                     if signal != 'HOLD':
+                        print(f"Found a {signal} signal for {symbol} on {timeframe}.")
                         last_signal_id = get_sent_signals(symbol, timeframe)
                         if not last_signal_id:
-                            for user_id in get_subscribed_users():
-                                user_lang = get_user_language(user_id)
-                                await send_alert(context, user_id, symbol, timeframe, signal, trade_info, user_lang)
+                            for user_id, user_lang in get_subscribed_users():
+                                translations = get_messages(user_lang)
+                                await send_alert(context, user_id, symbol, timeframe, signal, trade_info, user_lang, trend_info)
                                 save_sent_signal(user_id, symbol, timeframe, signal, trade_info)
+                else:
+                    print(f"Skipping {symbol} on {timeframe} due to insufficient data.")
         
     except Exception as e:
         print(f"Error during AI-driven scan: {e}")
@@ -707,8 +914,7 @@ async def check_new_listings(context: ContextTypes.DEFAULT_TYPE):
         
         if new_listings:
             subscribed_users = get_subscribed_users()
-            for user_id in subscribed_users:
-                lang = get_user_language(user_id)
+            for user_id, lang in subscribed_users:
                 translations = get_messages(lang)
                 message = translations['new_listing_alert']
                 for symbol in new_listings:
@@ -747,8 +953,7 @@ async def check_crypto_news(context: ContextTypes.DEFAULT_TYPE):
             cursor.execute('SELECT title FROM sent_news WHERE title = ?', (title,))
             if cursor.fetchone() is None:
                 subscribed_users = get_subscribed_users()
-                for user_id in subscribed_users:
-                    lang = get_user_language(user_id)
+                for user_id, lang in subscribed_users:
                     translations = get_messages(lang)
                     message = translations['news_alert'].format(title=title, link=link)
                     try:
@@ -763,6 +968,44 @@ async def check_crypto_news(context: ContextTypes.DEFAULT_TYPE):
         conn.close()
     except Exception as e:
         print(f"Error checking for news: {e}")
+        
+async def daily_market_summary(context: ContextTypes.DEFAULT_TYPE):
+    print("Generating daily market summary...")
+    exchange = ccxt.binance()
+    try:
+        tickers = exchange.fetch_tickers()
+        
+        gainer_list = []
+        loser_list = []
+        
+        for symbol, ticker_data in tickers.items():
+            try:
+                if ticker_data['quote'] == 'USDT' and ticker_data['active'] and ticker_data['percentage']:
+                    gainer_list.append({'symbol': symbol, 'change': ticker_data['percentage']})
+                    loser_list.append({'symbol': symbol, 'change': ticker_data['percentage']})
+            except (KeyError, TypeError):
+                continue
+        
+        gainer_list = sorted(gainer_list, key=lambda x: x['change'], reverse=True)[:3]
+        loser_list = sorted(loser_list, key=lambda x: x['change'])[:3]
+        
+        top_gainers_text = "\n".join([f"- **{gainer['symbol']}**: {gainer['change']:.2f}%" for gainer in gainer_list])
+        top_losers_text = "\n".join([f"- **{loser['symbol']}**: {loser['change']:.2f}%" for loser in loser_list])
+        
+        subscribed_users = get_subscribed_users()
+        for user_id, lang in subscribed_users:
+            translations = get_messages(lang)
+            message = translations['market_summary_title'] + '\n\n' + translations['market_summary_content'].format(
+                top_gainers=top_gainers_text,
+                top_losers=top_losers_text
+            )
+            try:
+                await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
+            except Exception as e:
+                print(f"Failed to send daily summary to user {user_id}: {e}")
+
+    except Exception as e:
+        print(f"Error generating daily market summary: {e}")
 
 def main():
     setup_database()
@@ -787,16 +1030,21 @@ def main():
     app = Application.builder().token(TOKEN).build()
     job_queue = app.job_queue
     
+    # Proactive jobs
     job_queue.run_repeating(monitor_and_find_signals, interval=300, first=datetime.time(0, 0))
     job_queue.run_repeating(check_new_listings, interval=3600, first=datetime.time(0, 0))
     job_queue.run_repeating(check_crypto_news, interval=1800, first=datetime.time(0, 0))
+    job_queue.run_repeating(daily_market_summary, interval=86400, first=datetime.time(hour=7, minute=0, second=0)) # Daily at 7 AM
 
+    # Handlers
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("compare", compare_command))
     app.add_handler(CallbackQueryHandler(back_to_menu, pattern='^back_to_menu$'))
     app.add_handler(CallbackQueryHandler(handle_callback))
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
+    # Admin Handlers
     app.add_handler(CommandHandler("admin_activate", activate_subscription))
     app.add_handler(CommandHandler("admin_deactivate", deactivate_subscription))
     app.add_handler(CommandHandler("admin_status", check_status))
