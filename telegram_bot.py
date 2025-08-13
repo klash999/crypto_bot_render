@@ -627,7 +627,9 @@ def main():
     app = Application.builder().token(TOKEN).build()
     job_queue = app.job_queue
     
+    # تردد الفحص: 300 ثانية = 5 دقائق
     job_queue.run_repeating(monitor_tradingview_signals, interval=300, first=datetime.time(0, 0))
+    # تردد الفحص: 600 ثانية = 10 دقائق
     job_queue.run_repeating(monitor_news, interval=600, first=datetime.time(0, 0))
 
     app.add_handler(CommandHandler("start", start_command))
@@ -642,4 +644,5 @@ def main():
     print("Bot is running and monitoring signals automatically...")
     app.run_polling()
 
-if __name__
+if __name__ == "__main__":
+    main()
