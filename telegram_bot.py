@@ -11,6 +11,7 @@ import ccxt
 import pandas as pd
 import talib
 import time
+import telegram
 
 # --- Bot Configuration ---
 TOKEN = os.getenv('TOKEN')
@@ -270,11 +271,8 @@ async def analyze_and_send_signal(context: ContextTypes.DEFAULT_TYPE, user_id: i
                     tp2=round(tp2, 4),
                     sl=round(sl, 4)
                 )
-                if CHANNEL_ID:
-                    await context.bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode='Markdown')
-                else:
-                    await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
-                print(f"Alert sent to user {user_id} for {symbol} on {timeframe} - {signal}")
+                await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
+                save_sent_signal(symbol, timeframe_str, signal)
     except Exception as e:
         print(f"Error fetching signal for {symbol} on {timeframe_str}: {e}")
         await context.bot.send_message(chat_id=user_id, text=translations['analyze_error'], parse_mode='Markdown')
@@ -423,11 +421,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     lang = get_user_language(user_id)
     translations = get_messages(lang)
-    
-    print(f"Callback received from user {user_id}: {query.data}")
 
     if not is_user_subscribed(user_id):
-        await query.edit_message_text(translations['main_menu_unsubscribed'])
+        await query.message.reply_text(translations['main_menu_unsubscribed'])
         return
 
     if query.data == 'symbols':
@@ -454,7 +450,11 @@ async def show_symbols_menu(query, translations):
     keyboard.append([InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(translations['select_symbols'], reply_markup=reply_markup)
+    try:
+        await query.edit_message_text(translations['select_symbols'], reply_markup=reply_markup)
+    except telegram.error.BadRequest as e:
+        if "Message is not modified" not in str(e):
+            raise e
 
 async def show_timeframes_menu(query, translations):
     user_id = query.from_user.id
@@ -469,14 +469,15 @@ async def show_timeframes_menu(query, translations):
     keyboard.append([InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(translations['select_timeframes'], reply_markup=reply_markup)
+    try:
+        await query.edit_message_text(translations['select_timeframes'], reply_markup=reply_markup)
+    except telegram.error.BadRequest as e:
+        if "Message is not modified" not in str(e):
+            raise e
 
 async def toggle_symbol(query, translations):
     user_id = query.from_user.id
     symbol = query.data.split('_')[2]
-    
-    print(f"Toggling symbol for user {user_id}: {symbol}")
-    
     subscribed_symbols, subscribed_timeframes = get_user_settings(user_id)
     
     if symbol in subscribed_symbols:
@@ -490,9 +491,6 @@ async def toggle_symbol(query, translations):
 async def toggle_timeframe(query, translations):
     user_id = query.from_user.id
     timeframe = query.data.split('_')[2]
-    
-    print(f"Toggling timeframe for user {user_id}: {timeframe}")
-    
     subscribed_symbols, subscribed_timeframes = get_user_settings(user_id)
     
     if timeframe in subscribed_timeframes:
