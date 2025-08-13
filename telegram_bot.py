@@ -446,7 +446,9 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(translations['analyze_usage'])
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    # This is the corrected line to get the user ID regardless of whether the update is a message or a callback
+    user_id = update.effective_user.id if hasattr(update, 'effective_user') else update.callback_query.from_user.id
+
     lang = get_user_language(user_id)
     translations = get_messages(lang)
     
@@ -493,7 +495,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             try:
                 await query.edit_message_text(welcome_message, parse_mode='Markdown')
-                await menu_command(query, context)
+                await menu_command(update, context) # Changed to pass update, not query
             except telegram.error.BadRequest as e:
                 if "Message is not modified" not in str(e):
                     raise e
@@ -532,7 +534,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith('toggle_timeframe_'):
         await toggle_timeframe(query, translations)
     elif query.data == 'back_to_menu':
-        await menu_command(query, context)
+        await menu_command(update, context) # Changed to pass update, not query
 
 async def show_symbols_menu(query, translations):
     user_id = query.from_user.id
