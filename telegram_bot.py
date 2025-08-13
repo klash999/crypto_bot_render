@@ -7,6 +7,10 @@ import os
 import requests
 import feedparser
 from tradingview_ta import TA_Handler, Interval, Exchange
+import ccxt
+import pandas as pd
+import talib
+import time
 
 # --- Bot Configuration ---
 TOKEN = os.getenv('TOKEN')
@@ -85,6 +89,9 @@ def get_subscribed_users():
     return results
 
 def is_user_subscribed(user_id):
+    if user_id == ADMIN_USER_ID:
+        return True
+
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     cursor.execute('SELECT subscription_expiry_date FROM users WHERE user_id = ?', (user_id,))
@@ -162,11 +169,11 @@ def save_news_sent(link):
 # --- Localization & UI ---
 MESSAGES = {
     'ar': {
-        'welcome': "مرحباً! أنا بوت تداول تلقائي. 🤖\n\n**مميزات البوت:**\n\n🔹 **تنبيهات تلقائية:** إشارات شراء وبيع للعملات الرقمية.\n🔹 **أخبار عاجلة:** أحدث أخبار السوق من مصادر موثوقة.\n🔹 **إعدادات مخصصة:** اختر العملات والفواصل الزمنية التي تهمك.\n\n**للاشتراك:**\n\n1. أرسل قيمة الاشتراك إلى محفظة Binance التالية:\n   `{binance_wallet_address}`\n\n2. **الباقات المتاحة:**\n   - **يومي:** {price_day}\n   - **أسبوعي:** {price_week}\n   - **شهري:** {price_month}\n\n3. أرسل صورة الإيصال ومعرف المستخدم الخاص بك (يمكنك الحصول عليه عبر الأمر /myid) للمدير ليتم تفعيل اشتراكك.",
+        'welcome': "مرحباً! أنا بوت تداول تلقائي. 🤖\n\n**مميزات البوت:**\n\n🔹 **تنبيهات تلقائية:** إشارات شراء وبيع للعملات الرقمية.\n🔹 **أخبار عاجلة:** أحدث أخبار السوق من مصادر موثوقة.\n🔹 **تحليل فوري:** يمكنك تحليل أي عملة تريدها عبر أمر `/analyze`.\n\n**للاشتراك:**\n\n1. أرسل قيمة الاشتراك إلى محفظة Binance التالية:\n   `{binance_wallet_address}`\n\n2. **الباقات المتاحة:**\n   - **يومي:** {price_day}\n   - **أسبوعي:** {price_week}\n   - **شهري:** {price_month}\n\n3. أرسل صورة الإيصال ومعرف المستخدم الخاص بك (يمكنك الحصول عليه عبر الأمر /myid) للمدير ليتم تفعيل اشتراكك.",
         'myid': "معرف المستخدم (User ID) الخاص بك هو:\n\n`{user_id}`\n\nقم بنسخه وإرساله للمدير لتفعيل اشتراكك.",
         'main_menu_unsubscribed': "عذراً، يجب أن تكون مشتركاً للوصول إلى هذه القائمة. للتفعيل، اتبع الخطوات في الرسالة الترحيبية /start.",
-        'main_menu_subscribed': "أهلاً بك في القائمة الرئيسية. اختر الإعدادات التي تريدها.",
-        'signal_found': "🚨 **تنبيه إشارة تداول جديدة!** 🚨\n\n**العملة:** {symbol}\n**الفاصل الزمني:** {timeframe}\n**الإشارة:** `{signal}`",
+        'main_menu_subscribed': "أهلاً بك في القائمة الرئيسية. اختر الإعدادات التي تريدها.\n\nيمكنك أيضاً استخدام أمر `/analyze` لتحليل أي عملة تريدها.",
+        'signal_found': "🚨 **تنبيه إشارة تداول جديدة!** 🚨\n\n**العملة:** {symbol}\n**الفاصل الزمني:** {timeframe}\n**الإشارة:** `{signal}`\n\n**تحليل فني (تقديري):**\n- **سعر الدخول:** {entry_price}\n- **هدف أول (TP1):** {tp1}\n- **هدف ثاني (TP2):** {tp2}\n- **وقف الخسارة (SL):** {sl}",
         'news_alert': "📰 **أخبار عاجلة!** 📰\n\n**{title}**\n\n[اقرأ المزيد هنا]({link})",
         'admin_only': "عذراً، هذا الأمر للآدمن فقط.",
         'activate_success': "✅ تم تفعيل اشتراك المستخدم {user_id} لمدة {duration}.",
@@ -176,11 +183,72 @@ MESSAGES = {
         'back_to_menu': "العودة للقائمة الرئيسية",
         'select_symbols': "اختر العملات التي تريد متابعتها:",
         'select_timeframes': "اختر الفواصل الزمنية التي تريد متابعتها:",
+        'analyze_usage': "الرجاء استخدام الأمر بالشكل الصحيح: /analyze [الرمز] [الفاصل الزمني]\nمثال: `/analyze BTCUSDT 4h`",
+        'analyze_error': "حدث خطأ أثناء تحليل العملة. يرجى التحقق من الرمز أو الفاصل الزمني والمحاولة مرة أخرى.",
+        'analyze_analyzing': "جاري تحليل العملة {symbol} على الفاصل الزمني {timeframe}...",
     }
 }
 
 def get_messages(lang):
     return MESSAGES.get(lang, MESSAGES['ar'])
+
+async def analyze_and_send_signal(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: str, timeframe_str: str, lang: str):
+    translations = get_messages(lang)
+    
+    try:
+        handler = TA_Handler(
+            symbol=symbol,
+            screener="crypto",
+            exchange="BINANCE",
+            interval=TIMEFRAMES_ENUM[timeframe_str],
+        )
+        analysis = handler.get_analysis()
+        
+        if analysis and analysis.summary:
+            recommendation = analysis.summary['RECOMMENDATION']
+            signal = None
+            if recommendation in ['STRONG_BUY', 'BUY']:
+                signal = "BUY"
+            elif recommendation in ['STRONG_SELL', 'SELL']:
+                signal = "SELL"
+            
+            if signal:
+                # Get current price using CCXT
+                exchange = ccxt.binance()
+                ticker = exchange.fetch_ticker(symbol)
+                current_price = ticker['last']
+                
+                # Get ATR for TP/SL calculation
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe_str, limit=14)
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                atr = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14).iloc[-1]
+
+                # Calculate TP/SL levels
+                if signal == "BUY":
+                    entry_price = current_price
+                    sl = current_price - (atr * 1.5)
+                    tp1 = current_price + (atr * 1.0)
+                    tp2 = current_price + (atr * 2.0)
+                else: # signal == "SELL"
+                    entry_price = current_price
+                    sl = current_price + (atr * 1.5)
+                    tp1 = current_price - (atr * 1.0)
+                    tp2 = current_price - (atr * 2.0)
+                
+                message = translations['signal_found'].format(
+                    symbol=symbol,
+                    timeframe=timeframe_str,
+                    signal=signal,
+                    entry_price=round(entry_price, 4),
+                    tp1=round(tp1, 4),
+                    tp2=round(tp2, 4),
+                    sl=round(sl, 4)
+                )
+                await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
+                save_sent_signal(symbol, timeframe_str, signal)
+    except Exception as e:
+        print(f"Error fetching signal for {symbol} on {timeframe_str}: {e}")
+        await context.bot.send_message(chat_id=user_id, text=translations['analyze_error'], parse_mode='Markdown')
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -194,6 +262,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price_week=SUBSCRIPTION_PRICES['week'],
         price_month=SUBSCRIPTION_PRICES['month']
     ), parse_mode='Markdown')
+    await menu_command(update, context)
 
 async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -221,6 +290,27 @@ async def admin_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(translations['activate_success'].format(user_id=user_to_activate, duration=duration))
     except (IndexError, ValueError):
         await update.message.reply_text(translations['activate_usage'])
+
+async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    translations = get_messages(lang)
+
+    if not is_user_subscribed(user_id):
+        await update.message.reply_text(translations['main_menu_unsubscribed'])
+        return
+    
+    try:
+        symbol = context.args[0].upper()
+        timeframe_str = context.args[1]
+        
+        if timeframe_str not in TIMEFRAMES_ENUM:
+            raise ValueError
+        
+        await update.message.reply_text(translations['analyze_analyzing'].format(symbol=symbol, timeframe=timeframe_str))
+        await analyze_and_send_signal(context, user_id, symbol, timeframe_str, lang)
+    except (IndexError, ValueError):
+        await update.message.reply_text(translations['analyze_usage'])
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -317,6 +407,54 @@ async def toggle_timeframe(query, translations):
     update_user_settings(user_id, subscribed_symbols, subscribed_timeframes)
     await show_timeframes_menu(query, translations)
 
+# --- Proactive Alerting System ---
+TIMEFRAMES_ENUM = {
+    "1h": Interval.INTERVAL_1_HOUR,
+    "4h": Interval.INTERVAL_4_HOURS,
+}
+
+async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: str, timeframe: str, signal: str, lang: str):
+    translations = get_messages(lang)
+    
+    # Calculate TP/SL for proactive alerts as well
+    try:
+        exchange = ccxt.binance()
+        ticker = exchange.fetch_ticker(symbol)
+        current_price = ticker['last']
+        
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=14)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        atr = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14).iloc[-1]
+
+        if signal == "BUY":
+            entry_price = current_price
+            sl = current_price - (atr * 1.5)
+            tp1 = current_price + (atr * 1.0)
+            tp2 = current_price + (atr * 2.0)
+        else:
+            entry_price = current_price
+            sl = current_price + (atr * 1.5)
+            tp1 = current_price - (atr * 1.0)
+            tp2 = current_price - (atr * 2.0)
+
+        message = translations['signal_found'].format(
+            symbol=symbol,
+            timeframe=timeframe,
+            signal=signal,
+            entry_price=round(entry_price, 4),
+            tp1=round(tp1, 4),
+            tp2=round(tp2, 4),
+            sl=round(sl, 4)
+        )
+        await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
+        print(f"Alert sent to user {user_id} for {symbol} on {timeframe} - {signal}")
+    except Exception as e:
+        print(f"Failed to send alert with TP/SL to user {user_id}: {e}")
+        # Fallback to simple message if TP/SL calculation fails
+        simple_message = translations['signal_found_simple'].format(symbol=symbol, timeframe=timeframe, signal=signal)
+        await context.bot.send_message(chat_id=user_id, text=simple_message, parse_mode='Markdown')
+    
+    
 async def monitor_tradingview_signals(context: ContextTypes.DEFAULT_TYPE):
     print("Running autonomous market scan...")
     subscribed_users = get_subscribed_users()
@@ -335,6 +473,9 @@ async def monitor_tradingview_signals(context: ContextTypes.DEFAULT_TYPE):
     for symbol in all_symbols_to_monitor:
         for timeframe_str in all_timeframes_to_monitor:
             try:
+                # Add a delay to avoid rate limiting
+                time.sleep(1) 
+                
                 handler = TA_Handler(
                     symbol=symbol,
                     screener="crypto",
@@ -388,13 +529,14 @@ def main():
     app = Application.builder().token(TOKEN).build()
     job_queue = app.job_queue
     
-    job_queue.run_repeating(monitor_tradingview_signals, interval=300, first=datetime.time(0, 0))
+    job_queue.run_repeating(monitor_tradingview_signals, interval=600, first=datetime.time(0, 0))
     job_queue.run_repeating(monitor_news, interval=900, first=datetime.time(0, 0))
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("myid", myid_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("admin_activate", admin_activate))
+    app.add_handler(CommandHandler("analyze", analyze_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     
     print("Bot is running and monitoring signals automatically...")
