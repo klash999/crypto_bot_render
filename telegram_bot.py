@@ -1,6 +1,3 @@
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
-import asyncio
 import sqlite3
 import datetime
 import os
@@ -11,8 +8,10 @@ import ccxt
 import pandas as pd
 import talib
 import time
-import telegram
+import telegram.error
 import logging
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # --- Bot Configuration ---
 TOKEN = os.getenv('TOKEN')
@@ -21,7 +20,7 @@ CHANNEL_ID = os.getenv('CHANNEL_ID')
 NEWS_RSS_URL = 'https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml'
 
 # === قم بتعديل هذه المعلومات ===
-BINANCE_WALLET_ADDRESS = "YOUR_BINANCE_WALLET_ADDRESS_HERE"
+BINANCE_WALLET_ADDRESS = "YOUR_BINANCE_WALLET_ADDRESS_HERE" # عنوان محفظة Binance الخاص بك
 SUBSCRIPTION_PRICES = {
     'day': '4 USDT',
     'week': '15 USDT',
@@ -211,7 +210,7 @@ MESSAGES = {
         'status_info': "📊 **حالة البوت:**\n\n- آخر فحص للإشارات: {last_signal_scan}\n- آخر فحص للأخبار: {last_news_scan}",
         'status_not_found': "📊 **حالة البوت:**\n\n- لا توجد بيانات حالة حالياً. يرجى الانتظار حتى يتم أول فحص.",
         'info_not_found': "❌ لم يتم العثور على معلومات للعملة `{symbol}`. يرجى التأكد من الرمز والمحاولة مرة أخرى.",
-        'info_details': "📈 **معلومات العملة:**\n\n**العملة:** `{symbol}`\n**السعر الحالي:** `{price}`\n**التغير اليومي (%):** `{change}`\n**أعلى سعر (24 ساعة):** `{high}`\n**أقل سعر (24 ساعة):** `{low}`\n**حجم التداول (24 ساعة):** `{volume}`",
+        'info_details': "📈 **معلومات العملة:**\n\n**العملة:** `{symbol}`\n**السعر الحالي:** `{price}`\n**التغير اليومي (%):** `{change}`\n**أعلى سعر (24 ساعة):** `{high}`\n**أقل سعر (24 ساعة):** `{low}`\n**حجم التداول (24 ساعة)::** `{volume}`",
         'main_menu_unsubscribed': "عذراً، يجب أن تكون مشتركاً للوصول إلى هذه القائمة. للتفعيل، اتبع الخطوات في الرسالة الترحيبية /start.",
         'main_menu_subscribed': "أهلاً بك في القائمة الرئيسية. اختر الإعدادات التي تريدها.\n\nيمكنك أيضاً استخدام أمر `/analyze` لتحليل أي عملة تريدها.",
         'subscription_button': "اضغط هنا للاشتراك",
@@ -511,14 +510,12 @@ async def show_settings_menu(query, translations):
     all_timeframes = ["15m", "1h", "4h"]
     
     keyboard = []
-    # إضافة أزرار العملات
     for symbol in all_symbols:
         emoji = "✅" if symbol in subscribed_symbols else "◻️"
         keyboard.append([InlineKeyboardButton(f"{emoji} {symbol}", callback_data=f'toggle_symbol_{symbol}')])
     
-    keyboard.append([InlineKeyboardButton("---", callback_data='_ignore_')]) # فاصل
+    keyboard.append([InlineKeyboardButton("---", callback_data='_ignore_')])
     
-    # إضافة أزرار الفواصل الزمنية
     for timeframe in all_timeframes:
         emoji = "✅" if timeframe in subscribed_timeframes else "◻️"
         keyboard.append([InlineKeyboardButton(f"{emoji} {timeframe}", callback_data=f'toggle_timeframe_{timeframe}')])
@@ -558,7 +555,6 @@ async def toggle_timeframe(query, translations, next_func):
     update_user_settings(user_id, subscribed_symbols, subscribed_timeframes)
     await next_func(query, translations)
 
-# --- Proactive Alerting System ---
 TIMEFRAMES_ENUM = {
     "15m": Interval.INTERVAL_15_MINUTES,
     "1h": Interval.INTERVAL_1_HOUR,
@@ -686,11 +682,10 @@ def main():
         print("Please set the TOKEN and ADMIN_USER_ID environment variables.")
         return
     
-    # --- الطريقة الصحيحة لحذف الـ Webhook قبل بدء البوت ---
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/deleteWebhook"
         response = requests.get(url)
-        response.raise_for_status()  # أرسل خطأ إذا كان الطلب غير ناجح
+        response.raise_for_status()
         print("Webhook deleted successfully.")
     except requests.exceptions.RequestException as e:
         print(f"Failed to delete webhook: {e}")
@@ -698,9 +693,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
     job_queue = app.job_queue
     
-    # تردد الفحص: 300 ثانية = 5 دقائق
     job_queue.run_repeating(monitor_tradingview_signals, interval=300, first=datetime.time(0, 0))
-    # تردد الفحص: 600 ثانية = 10 دقائق
     job_queue.run_repeating(monitor_news, interval=600, first=datetime.time(0, 0))
 
     app.add_handler(CommandHandler("start", start_command))
