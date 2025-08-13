@@ -5,4 +5,3 @@ numpy
 TA-Lib
 tradingview-ta
 requests
-feedparser 
