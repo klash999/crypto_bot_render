@@ -57,6 +57,12 @@ def setup_database():
             link TEXT PRIMARY KEY
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_status (
+            last_signal_scan TEXT,
+            last_news_scan TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -166,12 +172,34 @@ def save_news_sent(link):
     conn.commit()
     conn.close()
 
+def get_bot_status():
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('SELECT last_signal_scan, last_news_scan FROM bot_status ORDER BY last_signal_scan DESC LIMIT 1')
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
+def update_bot_status(scan_type):
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    if scan_type == 'signals':
+        cursor.execute('INSERT INTO bot_status (last_signal_scan) VALUES (?)', (datetime.datetime.now().isoformat(),))
+    elif scan_type == 'news':
+        cursor.execute('INSERT INTO bot_status (last_news_scan) VALUES (?)', (datetime.datetime.now().isoformat(),))
+    conn.commit()
+    conn.close()
+
 # --- Localization & UI ---
 MESSAGES = {
     'ar': {
         'welcome': "مرحباً! أنا بوت تداول تلقائي. 🤖\n\n**مميزات البوت:**\n\n🔹 **تنبيهات تلقائية:** إشارات شراء وبيع للعملات الرقمية.\n🔹 **أخبار عاجلة:** أحدث أخبار السوق من مصادر موثوقة.\n🔹 **تحليل فوري:** يمكنك تحليل أي عملة تريدها عبر أمر `/analyze`.",
         'subscription_info': "\n\n**للاشتراك:**\n\n1. أرسل قيمة الاشتراك إلى محفظة Binance التالية:\n   `{binance_wallet_address}`\n\n2. **الباقات المتاحة:**\n   - **يومي:** {price_day}\n   - **أسبوعي:** {price_week}\n   - **شهري:** {price_month}\n\n3. أرسل صورة الإيصال ومعرف المستخدم الخاص بك (يمكنك الحصول عليه عبر الأمر /myid) للمدير ليتم تفعيل اشتراكك.",
         'myid': "معرف المستخدم (User ID) الخاص بك هو:\n\n`{user_id}`\n\nقم بنسخه وإرساله للمدير لتفعيل اشتراكك.",
+        'status_info': "📊 **حالة البوت:**\n\n- آخر فحص للإشارات: {last_signal_scan}\n- آخر فحص للأخبار: {last_news_scan}",
+        'status_not_found': "📊 **حالة البوت:**\n\n- لا توجد بيانات حالة حالياً. يرجى الانتظار حتى يتم أول فحص.",
+        'info_not_found': "❌ لم يتم العثور على معلومات للعملة `{symbol}`. يرجى التأكد من الرمز والمحاولة مرة أخرى.",
+        'info_details': "📈 **معلومات العملة:**\n\n**العملة:** `{symbol}`\n**السعر الحالي:** `{price}`\n**التغير اليومي (%):** `{change}`\n**أعلى سعر (24 ساعة):** `{high}`\n**أقل سعر (24 ساعة):** `{low}`\n**حجم التداول (24 ساعة):** `{volume}`",
         'main_menu_unsubscribed': "عذراً، يجب أن تكون مشتركاً للوصول إلى هذه القائمة. للتفعيل، اتبع الخطوات في الرسالة الترحيبية /start.",
         'main_menu_subscribed': "أهلاً بك في القائمة الرئيسية. اختر الإعدادات التي تريدها.\n\nيمكنك أيضاً استخدام أمر `/analyze` لتحليل أي عملة تريدها.",
         'signal_found': "🚨 **تنبيه إشارة تداول جديدة!** 🚨\n\n**العملة:** {symbol}\n**الفاصل الزمني:** {timeframe}\n**الإشارة:** `{signal}`\n\n**تحليل فني (تقديري):**\n- **سعر الدخول:** {entry_price}\n- **هدف أول (TP1):** {tp1}\n- **هدف ثاني (TP2):** {tp2}\n- **وقف الخسارة (SL):** {sl}",
@@ -214,23 +242,20 @@ async def analyze_and_send_signal(context: ContextTypes.DEFAULT_TYPE, user_id: i
                 signal = "SELL"
             
             if signal:
-                # Get current price using CCXT
                 exchange = ccxt.binance()
                 ticker = exchange.fetch_ticker(symbol)
                 current_price = ticker['last']
                 
-                # Get ATR for TP/SL calculation
                 ohlcv = exchange.fetch_ohlcv(symbol, timeframe_str, limit=14)
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 atr = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14).iloc[-1]
 
-                # Calculate TP/SL levels
                 if signal == "BUY":
                     entry_price = current_price
                     sl = current_price - (atr * 1.5)
                     tp1 = current_price + (atr * 1.0)
                     tp2 = current_price + (atr * 2.0)
-                else: # signal == "SELL"
+                else:
                     entry_price = current_price
                     sl = current_price + (atr * 1.5)
                     tp1 = current_price - (atr * 1.0)
@@ -277,7 +302,59 @@ async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_language(user_id)
     translations = get_messages(lang)
     await update.message.reply_text(translations['myid'].format(user_id=user_id), parse_mode='Markdown')
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    translations = get_messages(lang)
+
+    if not is_user_subscribed(user_id):
+        await update.message.reply_text(translations['main_menu_unsubscribed'])
+        return
+
+    status_data = get_bot_status()
+    if status_data:
+        last_signal = status_data[0] if status_data[0] else 'N/A'
+        last_news = status_data[1] if status_data[1] else 'N/A'
+        message = translations['status_info'].format(last_signal_scan=last_signal, last_news_scan=last_news)
+        await update.message.reply_text(message, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(translations['status_not_found'], parse_mode='Markdown')
     
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    translations = get_messages(lang)
+
+    if not is_user_subscribed(user_id):
+        await update.message.reply_text(translations['main_menu_unsubscribed'])
+        return
+
+    try:
+        symbol = context.args[0].upper()
+        exchange = ccxt.binance()
+        ticker = exchange.fetch_ticker(symbol)
+
+        price = round(ticker['last'], 4)
+        change_percent = round(ticker['change_24h'], 2)
+        high = round(ticker['high_24h'], 4)
+        low = round(ticker['low_24h'], 4)
+        volume = round(ticker['quoteVolume'], 2)
+        
+        message = translations['info_details'].format(
+            symbol=symbol,
+            price=price,
+            change=change_percent,
+            high=high,
+            low=low,
+            volume=volume
+        )
+        await update.message.reply_text(message, parse_mode='Markdown')
+    except (IndexError, ccxt.ExchangeError):
+        await update.message.reply_text(translations['info_not_found'].format(symbol=context.args[0].upper()))
+    except Exception as e:
+        await update.message.reply_text(translations['analyze_error'])
+
 async def admin_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_language(user_id)
@@ -325,7 +402,6 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_language(user_id)
     translations = get_messages(lang)
     
-    # This check ensures that only subscribed users get the full menu
     if not is_user_subscribed(user_id):
         await update.message.reply_text(translations['main_menu_unsubscribed'])
         return
@@ -425,7 +501,6 @@ TIMEFRAMES_ENUM = {
 async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: str, timeframe: str, signal: str, lang: str):
     translations = get_messages(lang)
     
-    # Calculate TP/SL for proactive alerts as well
     try:
         exchange = ccxt.binance()
         ticker = exchange.fetch_ticker(symbol)
@@ -455,7 +530,10 @@ async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: s
             tp2=round(tp2, 4),
             sl=round(sl, 4)
         )
-        await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
+        if CHANNEL_ID:
+            await context.bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode='Markdown')
+        else:
+            await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
         print(f"Alert sent to user {user_id} for {symbol} on {timeframe} - {signal}")
     except Exception as e:
         print(f"Failed to send alert with TP/SL to user {user_id}: {e}")
@@ -466,6 +544,7 @@ async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: s
     
 async def monitor_tradingview_signals(context: ContextTypes.DEFAULT_TYPE):
     print("Running autonomous market scan...")
+    update_bot_status('signals')
     subscribed_users = get_subscribed_users()
     
     all_symbols_to_monitor = set()
@@ -482,7 +561,6 @@ async def monitor_tradingview_signals(context: ContextTypes.DEFAULT_TYPE):
     for symbol in all_symbols_to_monitor:
         for timeframe_str in all_timeframes_to_monitor:
             try:
-                # Add a delay to avoid rate limiting
                 time.sleep(1) 
                 
                 handler = TA_Handler(
@@ -511,6 +589,7 @@ async def monitor_tradingview_signals(context: ContextTypes.DEFAULT_TYPE):
 
 async def monitor_news(context: ContextTypes.DEFAULT_TYPE):
     print("Running news monitor...")
+    update_bot_status('news')
     try:
         feed = feedparser.parse(NEWS_RSS_URL)
         if feed.entries:
@@ -538,12 +617,16 @@ def main():
     app = Application.builder().token(TOKEN).build()
     job_queue = app.job_queue
     
-    job_queue.run_repeating(monitor_tradingview_signals, interval=600, first=datetime.time(0, 0))
-    job_queue.run_repeating(monitor_news, interval=900, first=datetime.time(0, 0))
+    # تردد الفحص: 300 ثانية = 5 دقائق
+    job_queue.run_repeating(monitor_tradingview_signals, interval=300, first=datetime.time(0, 0))
+    # تردد الفحص: 600 ثانية = 10 دقائق
+    job_queue.run_repeating(monitor_news, interval=600, first=datetime.time(0, 0))
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("myid", myid_command))
     app.add_handler(CommandHandler("menu", menu_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("info", info_command))
     app.add_handler(CommandHandler("admin_activate", admin_activate))
     app.add_handler(CommandHandler("analyze", analyze_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
