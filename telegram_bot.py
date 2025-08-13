@@ -690,6 +690,11 @@ def main():
         return
         
     app = Application.builder().token(TOKEN).build()
+    
+    # === السطر الجديد الذي يجب إضافته ===
+    asyncio.run(app.bot.delete_webhook())
+    # ==================================
+    
     job_queue = app.job_queue
     
     # تردد الفحص: 300 ثانية = 5 دقائق
