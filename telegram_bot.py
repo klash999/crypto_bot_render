@@ -3,6 +3,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 import asyncio
 import sqlite3
 import datetime
+import requests
 import os
 import requests
 import feedparser
@@ -688,13 +689,17 @@ def main():
     if not TOKEN or not ADMIN_USER_ID:
         print("Please set the TOKEN and ADMIN_USER_ID environment variables.")
         return
+    
+    # --- الطريقة الصحيحة لحذف الـ Webhook قبل بدء البوت ---
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/deleteWebhook"
+        response = requests.get(url)
+        response.raise_for_status()  # أرسل خطأ إذا كان الطلب غير ناجح
+        print("Webhook deleted successfully.")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to delete webhook: {e}")
         
     app = Application.builder().token(TOKEN).build()
-    
-    # === السطر الجديد الذي يجب إضافته ===
-    asyncio.run(app.bot.delete_webhook())
-    # ==================================
-    
     job_queue = app.job_queue
     
     # تردد الفحص: 300 ثانية = 5 دقائق
