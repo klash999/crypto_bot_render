@@ -1,8 +1,8 @@
-python-telegram-bot
+python-telegram-bot[job-queue]
 ccxt
 pandas
 numpy
 TA-Lib
 tradingview-ta
 requests
-feedparser
+feedparse
