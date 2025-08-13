@@ -1,9 +1,8 @@
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters, JobQueue
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 import asyncio
 import sqlite3
 import datetime
-import requests
 import os
 import requests
 import feedparser
@@ -13,6 +12,7 @@ import pandas as pd
 import talib
 import time
 import telegram
+import logging
 
 # --- Bot Configuration ---
 TOKEN = os.getenv('TOKEN')
@@ -27,8 +27,7 @@ SUBSCRIPTION_PRICES = {
     'week': '15 USDT',
     'month': '45 USDT'
 }
-# === أضف اسم المستخدم الخاص بالآدمن هنا ===
-ADMIN_USERNAME = "mohammadksa9" # <---  تم التحديث
+ADMIN_USERNAME = "mohammadksa9"
 # =================================
 
 # --- Database & Subscription Management ---
@@ -205,7 +204,8 @@ def update_bot_status(scan_type):
 MESSAGES = {
     'ar': {
         'welcome_language_select': "مرحباً! يرجى اختيار اللغة:",
-        'welcome': "مرحباً! أنا بوت تداول تلقائي. 🤖\n\n**مميزات البوت:**\n\n🔹 **تنبيهات تلقائية:** إشارات شراء وبيع للعملات الرقمية.\n🔹 **أخبار عاجلة:** أحدث أخبار السوق من مصادر موثوقة.\n🔹 **تحليل فوري:** يمكنك تحليل أي عملة تريدها عبر أمر `/analyze`.",
+        'welcome_unsubscribed': "مرحباً! أنا بوت تداول آلي. 🤖\n\n**مميزات البوت:**\n\n🔹 **تنبيهات تلقائية:** إشارات شراء وبيع للعملات الرقمية.\n🔹 **أخبار عاجلة:** أحدث أخبار السوق من مصادر موثوقة.\n🔹 **تحليل فوري:** يمكنك تحليل أي عملة تريدها عبر أمر `/analyze`.\n\n**للاشتراك في الميزات الحصرية، اضغط على الزر أدناه.**",
+        'welcome_subscribed': "أهلاً بك مرة أخرى! لقد تم تفعيل اشتراكك.\n\nاستخدم القائمة الرئيسية للوصول إلى الإعدادات أو تحليل العملات.",
         'subscription_info': "\n\n**للاشتراك:**\n\n1. أرسل قيمة الاشتراك إلى محفظة Binance التالية:\n   `{binance_wallet_address}`\n\n2. **الباقات المتاحة:**\n   - **يومي:** {price_day}\n   - **أسبوعي:** {price_week}\n   - **شهري:** {price_month}\n\n3. أرسل صورة الإيصال ومعرف المستخدم الخاص بك (يمكنك الحصول عليه عبر الأمر /myid) للمدير ليتم تفعيل اشتراكك.",
         'myid': "معرف المستخدم (User ID) الخاص بك هو:\n\n`{user_id}`\n\nقم بنسخه وإرساله للمدير لتفعيل اشتراكك.",
         'status_info': "📊 **حالة البوت:**\n\n- آخر فحص للإشارات: {last_signal_scan}\n- آخر فحص للأخبار: {last_news_scan}",
@@ -214,26 +214,24 @@ MESSAGES = {
         'info_details': "📈 **معلومات العملة:**\n\n**العملة:** `{symbol}`\n**السعر الحالي:** `{price}`\n**التغير اليومي (%):** `{change}`\n**أعلى سعر (24 ساعة):** `{high}`\n**أقل سعر (24 ساعة):** `{low}`\n**حجم التداول (24 ساعة):** `{volume}`",
         'main_menu_unsubscribed': "عذراً، يجب أن تكون مشتركاً للوصول إلى هذه القائمة. للتفعيل، اتبع الخطوات في الرسالة الترحيبية /start.",
         'main_menu_subscribed': "أهلاً بك في القائمة الرئيسية. اختر الإعدادات التي تريدها.\n\nيمكنك أيضاً استخدام أمر `/analyze` لتحليل أي عملة تريدها.",
-        'subscription_button': "للاشتراك في البوت اضغط هنا",
+        'subscription_button': "اضغط هنا للاشتراك",
         'signal_found': "🚨 **تنبيه إشارة تداول جديدة!** 🚨\n\n**العملة:** {symbol}\n**الفاصل الزمني:** {timeframe}\n**الإشارة:** `{signal}`\n\n**تحليل فني (تقديري):**\n- **سعر الدخول:** {entry_price}\n- **هدف أول (TP1):** {tp1}\n- **هدف ثاني (TP2):** {tp2}\n- **وقف الخسارة (SL):** {sl}",
         'news_alert': "📰 **أخبار عاجلة!** 📰\n\n**{title}**\n\n[اقرأ المزيد هنا]({link})",
         'admin_only': "عذراً، هذا الأمر للآدمن فقط.",
         'activate_success': "✅ تم تفعيل اشتراك المستخدم {user_id} لمدة {duration}.",
         'activate_usage': "الرجاء استخدام الأمر بالشكل الصحيح: /admin_activate [user_id] [day|week|month]",
-        'menu_symbols': "إعدادات العملات",
-        'menu_timeframes': "إعدادات الفواصل الزمنية",
+        'menu_settings': "⚙️ الإعدادات",
         'back_to_menu': "العودة للقائمة الرئيسية",
-        'select_symbols': "اختر العملات التي تريد متابعتها:",
-        'select_timeframes': "اختر الفواصل الزمنية التي تريد متابعتها:",
         'analyze_usage': "الرجاء استخدام الأمر بالشكل الصحيح: /analyze [الرمز] [الفاصل الزمني]\nمثال: `/analyze BTCUSDT 4h`",
         'analyze_error': "حدث خطأ أثناء تحليل العملة. يرجى التحقق من الرمز أو الفاصل الزمني والمحاولة مرة أخرى.",
         'analyze_analyzing': "جاري تحليل العملة {symbol} على الفاصل الزمني {timeframe}...",
-        'contact_admin_button': "تواصل مع الآدمن",
+        'contact_admin_button': "👤 تواصل مع الآدمن",
         'admin_contact_info': "للتواصل مع الآدمن، يرجى إرسال رسالة إلى:\n@{admin_username}\n\nيرجى إرسال إيصال الدفع ومعرف المستخدم الخاص بك لتفعيل اشتراكك.",
     },
     'en': {
         'welcome_language_select': "Hello! Please select your language:",
-        'welcome': "Hello! I am an automatic trading bot. 🤖\n\n**Bot Features:**\n\n🔹 **Automatic Alerts:** Buy and sell signals for cryptocurrencies.\n🔹 **Breaking News:** Latest market news from trusted sources.\n🔹 **Instant Analysis:** You can analyze any currency you want with the `/analyze` command.",
+        'welcome_unsubscribed': "Hello! I am an automatic trading bot. 🤖\n\n**Bot Features:**\n\n🔹 **Automatic Alerts:** Buy and sell signals for cryptocurrencies.\n🔹 **Breaking News:** Latest market news from trusted sources.\n🔹 **Instant Analysis:** You can analyze any currency you want with the `/analyze` command.\n\n**To subscribe to exclusive features, press the button below.**",
+        'welcome_subscribed': "Welcome back! Your subscription is active.\n\nUse the main menu to access settings or analyze currencies.",
         'subscription_info': "\n\n**To subscribe:**\n\n1. Send the subscription value to the following Binance wallet:\n   `{binance_wallet_address}`\n\n2. **Available Packages:**\n   - **Daily:** {price_day}\n   - **Weekly:** {price_week}\n   - **Monthly:** {price_month}\n\n3. Send the receipt and your User ID (you can get it with the /myid command) to the admin to activate your subscription.",
         'myid': "Your User ID is:\n\n`{user_id}`\n\nCopy and send it to the admin to activate your subscription.",
         'status_info': "📊 **Bot Status:**\n\n- Last Signal Scan: {last_signal_scan}\n- Last News Scan: {last_news_scan}",
@@ -242,24 +240,22 @@ MESSAGES = {
         'info_details': "📈 **Symbol Information:**\n\n**Symbol:** `{symbol}`\n**Current Price:** `{price}`\n**Daily Change (%):** `{change}`\n**24h High:** `{high}`\n**24h Low:** `{low}`\n**24h Volume:** `{volume}`",
         'main_menu_unsubscribed': "Sorry, you must be a subscriber to access this menu. To activate, follow the steps in the welcome message /start.",
         'main_menu_subscribed': "Welcome to the main menu. Choose the settings you want.\n\nYou can also use the `/analyze` command to analyze any currency you want.",
-        'subscription_button': "To subscribe to the bot, click here",
+        'subscription_button': "Click Here to Subscribe",
         'signal_found': "🚨 **New Trading Signal Alert!** 🚨\n\n**Symbol:** {symbol}\n**Timeframe:** {timeframe}\n**Signal:** `{signal}`\n\n**Technical Analysis (Approximate):**\n- **Entry Price:** {entry_price}\n- **Take Profit 1 (TP1):** {tp1}\n- **Take Profit 2 (TP2):** {tp2}\n- **Stop Loss (SL):** {sl}",
         'news_alert': "📰 **Breaking News!** 📰\n\n**{title}**\n\n[Read more here]({link})",
         'admin_only': "Sorry, this command is for the admin only.",
         'activate_success': "✅ Subscription for user {user_id} has been activated for {duration}.",
         'activate_usage': "Please use the command correctly: /admin_activate [user_id] [day|week|month]",
-        'menu_symbols': "Symbols Settings",
-        'menu_timeframes': "Timeframes Settings",
+        'menu_settings': "⚙️ Settings",
         'back_to_menu': "Back to Main Menu",
-        'select_symbols': "Select the symbols you want to follow:",
-        'select_timeframes': "Select the timeframes you want to follow:",
         'analyze_usage': "Please use the command correctly: /analyze [Symbol] [Timeframe]\nExample: `/analyze BTCUSDT 4h`",
         'analyze_error': "An error occurred while analyzing the symbol. Please check the symbol or timeframe and try again.",
         'analyze_analyzing': "Analyzing symbol {symbol} on timeframe {timeframe}...",
-        'contact_admin_button': "Contact Admin",
+        'contact_admin_button': "👤 Contact Admin",
         'admin_contact_info': "To contact the admin, please send a message to:\n@{admin_username}\n\nPlease send your payment receipt and your User ID to activate your subscription.",
     }
 }
+
 
 def get_messages(lang):
     return MESSAGES.get(lang, MESSAGES['ar'])
@@ -336,10 +332,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(MESSAGES['ar']['welcome_language_select'], reply_markup=reply_markup)
     else:
         translations = get_messages(user_lang)
-        welcome_message = translations['welcome']
         
-        await update.message.reply_text(welcome_message, parse_mode='Markdown')
-        await menu_command(update, context)
+        if is_user_subscribed(user_id):
+            await update.message.reply_text(translations['welcome_subscribed'], parse_mode='Markdown')
+            await menu_command(update, context)
+        else:
+            await update.message.reply_text(translations['welcome_unsubscribed'], parse_mode='Markdown')
+            keyboard = [[InlineKeyboardButton(translations['subscription_button'], callback_data='show_subscription_info')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(translations['main_menu_unsubscribed'], reply_markup=reply_markup)
 
 async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -447,8 +448,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     translations = get_messages(lang)
     
     keyboard = [
-        [InlineKeyboardButton(translations['menu_symbols'], callback_data='symbols')],
-        [InlineKeyboardButton(translations['menu_timeframes'], callback_data='timeframes')],
+        [InlineKeyboardButton(translations['menu_settings'], callback_data='settings')],
         [InlineKeyboardButton(translations['contact_admin_button'], callback_data='contact_admin')],
     ]
 
@@ -465,14 +465,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_user_language(user_id, lang_code)
         
         translations = get_messages(lang_code)
-        welcome_message = translations['welcome']
         
-        try:
-            await query.edit_message_text(welcome_message, parse_mode='Markdown')
+        if is_user_subscribed(user_id):
+            await query.message.reply_text(translations['welcome_subscribed'], parse_mode='Markdown')
             await menu_command(update, context)
-        except telegram.error.BadRequest as e:
-            if "Message is not modified" not in str(e):
-                raise e
+        else:
+            await query.message.reply_text(translations['welcome_unsubscribed'], parse_mode='Markdown')
+            keyboard = [[InlineKeyboardButton(translations['subscription_button'], callback_data='show_subscription_info')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.reply_text(translations['main_menu_unsubscribed'], reply_markup=reply_markup)
         return
     
     lang = get_user_language(user_id)
@@ -482,54 +483,42 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(translations['admin_contact_info'].format(admin_username=ADMIN_USERNAME), parse_mode='Markdown')
         return
 
-    if not is_user_subscribed(user_id) and query.data not in ['back_to_menu', 'symbols', 'timeframes']:
+    if query.data == 'show_subscription_info':
+        await query.message.reply_text(translations['subscription_info'], parse_mode='Markdown')
+        return
+
+    if query.data == 'back_to_menu':
+        await menu_command(update, context)
+        return
+
+    if not is_user_subscribed(user_id):
         keyboard = [[InlineKeyboardButton(translations['subscription_button'], callback_data='show_subscription_info')]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.reply_text(translations['main_menu_unsubscribed'], reply_markup=reply_markup)
         return
 
-    if query.data == 'symbols':
-        await show_symbols_menu(query, translations)
-    elif query.data == 'timeframes':
-        await show_timeframes_menu(query, translations)
+    if query.data == 'settings':
+        await show_settings_menu(query, translations)
     elif query.data.startswith('toggle_symbol_'):
-        if not is_user_subscribed(user_id):
-            await query.message.reply_text(translations['main_menu_unsubscribed'])
-            return
-        await toggle_symbol(query, translations)
+        await toggle_symbol(query, translations, show_settings_menu)
     elif query.data.startswith('toggle_timeframe_'):
-        if not is_user_subscribed(user_id):
-            await query.message.reply_text(translations['main_menu_unsubscribed'])
-            return
-        await toggle_timeframe(query, translations)
-    elif query.data == 'back_to_menu':
-        await menu_command(update, context)
+        await toggle_timeframe(query, translations, show_settings_menu)
 
-async def show_symbols_menu(query, translations):
+async def show_settings_menu(query, translations):
     user_id = query.from_user.id
-    subscribed_symbols, _ = get_user_settings(user_id)
+    subscribed_symbols, subscribed_timeframes = get_user_settings(user_id)
     all_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT", "XRPUSDT"]
+    all_timeframes = ["15m", "1h", "4h"]
     
     keyboard = []
+    # إضافة أزرار العملات
     for symbol in all_symbols:
         emoji = "✅" if symbol in subscribed_symbols else "◻️"
         keyboard.append([InlineKeyboardButton(f"{emoji} {symbol}", callback_data=f'toggle_symbol_{symbol}')])
     
-    keyboard.append([InlineKeyboardButton(translations['back_to_menu'], callback_data='back_to_menu')])
+    keyboard.append([InlineKeyboardButton("---", callback_data='_ignore_')]) # فاصل
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    try:
-        await query.edit_message_text(translations['select_symbols'], reply_markup=reply_markup)
-    except telegram.error.BadRequest as e:
-        if "Message is not modified" not in str(e):
-            raise e
-
-async def show_timeframes_menu(query, translations):
-    user_id = query.from_user.id
-    _, subscribed_timeframes = get_user_settings(user_id)
-    all_timeframes = ["1h", "4h"]
-    
-    keyboard = []
+    # إضافة أزرار الفواصل الزمنية
     for timeframe in all_timeframes:
         emoji = "✅" if timeframe in subscribed_timeframes else "◻️"
         keyboard.append([InlineKeyboardButton(f"{emoji} {timeframe}", callback_data=f'toggle_timeframe_{timeframe}')])
@@ -538,12 +527,12 @@ async def show_timeframes_menu(query, translations):
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
-        await query.edit_message_text(translations['select_timeframes'], reply_markup=reply_markup)
+        await query.edit_message_text(translations['menu_settings'], reply_markup=reply_markup)
     except telegram.error.BadRequest as e:
         if "Message is not modified" not in str(e):
             raise e
 
-async def toggle_symbol(query, translations):
+async def toggle_symbol(query, translations, next_func):
     user_id = query.from_user.id
     symbol = query.data.split('_')[2]
     subscribed_symbols, subscribed_timeframes = get_user_settings(user_id)
@@ -554,9 +543,9 @@ async def toggle_symbol(query, translations):
         subscribed_symbols.append(symbol)
     
     update_user_settings(user_id, subscribed_symbols, subscribed_timeframes)
-    await show_symbols_menu(query, translations)
+    await next_func(query, translations)
 
-async def toggle_timeframe(query, translations):
+async def toggle_timeframe(query, translations, next_func):
     user_id = query.from_user.id
     timeframe = query.data.split('_')[2]
     subscribed_symbols, subscribed_timeframes = get_user_settings(user_id)
@@ -567,12 +556,14 @@ async def toggle_timeframe(query, translations):
         subscribed_timeframes.append(timeframe)
     
     update_user_settings(user_id, subscribed_symbols, subscribed_timeframes)
-    await show_timeframes_menu(query, translations)
+    await next_func(query, translations)
 
 # --- Proactive Alerting System ---
 TIMEFRAMES_ENUM = {
+    "15m": Interval.INTERVAL_15_MINUTES,
     "1h": Interval.INTERVAL_1_HOUR,
     "4h": Interval.INTERVAL_4_HOURS,
+    "1d": Interval.INTERVAL_1_DAY,
 }
 
 async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: str, timeframe: str, signal: str, lang: str):
@@ -614,14 +605,13 @@ async def send_alert(context: ContextTypes.DEFAULT_TYPE, user_id: int, symbol: s
         print(f"Alert sent to user {user_id} for {symbol} on {timeframe} - {signal}")
     except Exception as e:
         print(f"Failed to send alert with TP/SL to user {user_id}: {e}")
-        simple_message = translations['signal_found_simple'].format(symbol=symbol, timeframe=timeframe, signal=signal)
-        await context.bot.send_message(chat_id=user_id, text=simple_message, parse_mode='Markdown')
     
     
 async def monitor_tradingview_signals(context: ContextTypes.DEFAULT_TYPE):
     print("Running autonomous market scan...")
     update_bot_status('signals')
     subscribed_users = get_subscribed_users()
+    print(f"Found {len(subscribed_users)} subscribed users to monitor.")
     
     all_symbols_to_monitor = set()
     all_timeframes_to_monitor = set()
@@ -633,6 +623,9 @@ async def monitor_tradingview_signals(context: ContextTypes.DEFAULT_TYPE):
         if timeframes_str:
             for t in timeframes_str.split(','):
                 all_timeframes_to_monitor.add(t)
+
+    print(f"Monitoring symbols: {all_symbols_to_monitor}")
+    print(f"Monitoring timeframes: {all_timeframes_to_monitor}")
 
     for symbol in all_symbols_to_monitor:
         for timeframe_str in all_timeframes_to_monitor:
@@ -651,6 +644,7 @@ async def monitor_tradingview_signals(context: ContextTypes.DEFAULT_TYPE):
                     recommendation = analysis.summary['RECOMMENDATION']
                     
                     if recommendation in ['STRONG_BUY', 'BUY', 'STRONG_SELL', 'SELL']:
+                        print(f"Signal found for {symbol} on {timeframe_str}: {recommendation}")
                         signal = "BUY" if "BUY" in recommendation else "SELL"
                         
                         last_signal = get_last_sent_signal(symbol, timeframe_str)
@@ -660,6 +654,8 @@ async def monitor_tradingview_signals(context: ContextTypes.DEFAULT_TYPE):
                                 if user_symbols and user_timeframes and symbol in user_symbols.split(',') and timeframe_str in user_timeframes.split(','):
                                     await send_alert(context, user_id, symbol, timeframe_str, signal, lang)
                             save_sent_signal(symbol, timeframe_str, signal)
+                    else:
+                        print(f"No strong signal for {symbol} on {timeframe_str}: {recommendation}")
             except Exception as e:
                 print(f"Error fetching signal for {symbol} on {timeframe_str}: {e}")
 
