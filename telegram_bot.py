@@ -39,7 +39,7 @@ def setup_database():
             user_id INTEGER PRIMARY KEY,
             is_subscribed INTEGER DEFAULT 0,
             subscription_expiry_date TEXT,
-            language TEXT DEFAULT 'ar',
+            language TEXT,
             subscribed_symbols TEXT,
             subscribed_timeframes TEXT
         )
@@ -141,7 +141,14 @@ def get_user_language(user_id):
     cursor.execute('SELECT language FROM users WHERE user_id = ?', (user_id,))
     result = cursor.fetchone()
     conn.close()
-    return result[0] if result else 'ar'
+    return result[0] if result and result[0] else None
+
+def set_user_language(user_id, lang_code):
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute('UPDATE users SET language = ? WHERE user_id = ?', (lang_code, user_id))
+    conn.commit()
+    conn.close()
 
 def get_last_sent_signal(symbol, timeframe):
     conn = sqlite3.connect(DATABASE_NAME)
@@ -194,6 +201,7 @@ def update_bot_status(scan_type):
 # --- Localization & UI ---
 MESSAGES = {
     'ar': {
+        'welcome_language_select': "مرحباً! يرجى اختيار اللغة:",
         'welcome': "مرحباً! أنا بوت تداول تلقائي. 🤖\n\n**مميزات البوت:**\n\n🔹 **تنبيهات تلقائية:** إشارات شراء وبيع للعملات الرقمية.\n🔹 **أخبار عاجلة:** أحدث أخبار السوق من مصادر موثوقة.\n🔹 **تحليل فوري:** يمكنك تحليل أي عملة تريدها عبر أمر `/analyze`.",
         'subscription_info': "\n\n**للاشتراك:**\n\n1. أرسل قيمة الاشتراك إلى محفظة Binance التالية:\n   `{binance_wallet_address}`\n\n2. **الباقات المتاحة:**\n   - **يومي:** {price_day}\n   - **أسبوعي:** {price_week}\n   - **شهري:** {price_month}\n\n3. أرسل صورة الإيصال ومعرف المستخدم الخاص بك (يمكنك الحصول عليه عبر الأمر /myid) للمدير ليتم تفعيل اشتراكك.",
         'myid': "معرف المستخدم (User ID) الخاص بك هو:\n\n`{user_id}`\n\nقم بنسخه وإرساله للمدير لتفعيل اشتراكك.",
@@ -203,6 +211,7 @@ MESSAGES = {
         'info_details': "📈 **معلومات العملة:**\n\n**العملة:** `{symbol}`\n**السعر الحالي:** `{price}`\n**التغير اليومي (%):** `{change}`\n**أعلى سعر (24 ساعة):** `{high}`\n**أقل سعر (24 ساعة):** `{low}`\n**حجم التداول (24 ساعة):** `{volume}`",
         'main_menu_unsubscribed': "عذراً، يجب أن تكون مشتركاً للوصول إلى هذه القائمة. للتفعيل، اتبع الخطوات في الرسالة الترحيبية /start.",
         'main_menu_subscribed': "أهلاً بك في القائمة الرئيسية. اختر الإعدادات التي تريدها.\n\nيمكنك أيضاً استخدام أمر `/analyze` لتحليل أي عملة تريدها.",
+        'subscription_button': "للاشتراك في البوت اضغط هنا",
         'signal_found': "🚨 **تنبيه إشارة تداول جديدة!** 🚨\n\n**العملة:** {symbol}\n**الفاصل الزمني:** {timeframe}\n**الإشارة:** `{signal}`\n\n**تحليل فني (تقديري):**\n- **سعر الدخول:** {entry_price}\n- **هدف أول (TP1):** {tp1}\n- **هدف ثاني (TP2):** {tp2}\n- **وقف الخسارة (SL):** {sl}",
         'news_alert': "📰 **أخبار عاجلة!** 📰\n\n**{title}**\n\n[اقرأ المزيد هنا]({link})",
         'admin_only': "عذراً، هذا الأمر للآدمن فقط.",
@@ -216,6 +225,32 @@ MESSAGES = {
         'analyze_usage': "الرجاء استخدام الأمر بالشكل الصحيح: /analyze [الرمز] [الفاصل الزمني]\nمثال: `/analyze BTCUSDT 4h`",
         'analyze_error': "حدث خطأ أثناء تحليل العملة. يرجى التحقق من الرمز أو الفاصل الزمني والمحاولة مرة أخرى.",
         'analyze_analyzing': "جاري تحليل العملة {symbol} على الفاصل الزمني {timeframe}...",
+    },
+    'en': {
+        'welcome_language_select': "Hello! Please select your language:",
+        'welcome': "Hello! I am an automatic trading bot. 🤖\n\n**Bot Features:**\n\n🔹 **Automatic Alerts:** Buy and sell signals for cryptocurrencies.\n🔹 **Breaking News:** Latest market news from trusted sources.\n🔹 **Instant Analysis:** You can analyze any currency you want with the `/analyze` command.",
+        'subscription_info': "\n\n**To subscribe:**\n\n1. Send the subscription value to the following Binance wallet:\n   `{binance_wallet_address}`\n\n2. **Available Packages:**\n   - **Daily:** {price_day}\n   - **Weekly:** {price_week}\n   - **Monthly:** {price_month}\n\n3. Send the receipt and your User ID (you can get it with the /myid command) to the admin to activate your subscription.",
+        'myid': "Your User ID is:\n\n`{user_id}`\n\nCopy and send it to the admin to activate your subscription.",
+        'status_info': "📊 **Bot Status:**\n\n- Last Signal Scan: {last_signal_scan}\n- Last News Scan: {last_news_scan}",
+        'status_not_found': "📊 **Bot Status:**\n\n- No status data found currently. Please wait for the first scan.",
+        'info_not_found': "❌ No information was found for the symbol `{symbol}`. Please check the symbol and try again.",
+        'info_details': "📈 **Symbol Information:**\n\n**Symbol:** `{symbol}`\n**Current Price:** `{price}`\n**Daily Change (%):** `{change}`\n**24h High:** `{high}`\n**24h Low:** `{low}`\n**24h Volume:** `{volume}`",
+        'main_menu_unsubscribed': "Sorry, you must be a subscriber to access this menu. To activate, follow the steps in the welcome message /start.",
+        'main_menu_subscribed': "Welcome to the main menu. Choose the settings you want.\n\nYou can also use the `/analyze` command to analyze any currency you want.",
+        'subscription_button': "To subscribe to the bot, click here",
+        'signal_found': "🚨 **New Trading Signal Alert!** 🚨\n\n**Symbol:** {symbol}\n**Timeframe:** {timeframe}\n**Signal:** `{signal}`\n\n**Technical Analysis (Approximate):**\n- **Entry Price:** {entry_price}\n- **Take Profit 1 (TP1):** {tp1}\n- **Take Profit 2 (TP2):** {tp2}\n- **Stop Loss (SL):** {sl}",
+        'news_alert': "📰 **Breaking News!** 📰\n\n**{title}**\n\n[Read more here]({link})",
+        'admin_only': "Sorry, this command is for the admin only.",
+        'activate_success': "✅ Subscription for user {user_id} has been activated for {duration}.",
+        'activate_usage': "Please use the command correctly: /admin_activate [user_id] [day|week|month]",
+        'menu_symbols': "Symbols Settings",
+        'menu_timeframes': "Timeframes Settings",
+        'back_to_menu': "Back to Main Menu",
+        'select_symbols': "Select the symbols you want to follow:",
+        'select_timeframes': "Select the timeframes you want to follow:",
+        'analyze_usage': "Please use the command correctly: /analyze [Symbol] [Timeframe]\nExample: `/analyze BTCUSDT 4h`",
+        'analyze_error': "An error occurred while analyzing the symbol. Please check the symbol or timeframe and try again.",
+        'analyze_analyzing': "Analyzing symbol {symbol} on timeframe {timeframe}...",
     }
 }
 
@@ -271,8 +306,11 @@ async def analyze_and_send_signal(context: ContextTypes.DEFAULT_TYPE, user_id: i
                     tp2=round(tp2, 4),
                     sl=round(sl, 4)
                 )
-                await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
-                save_sent_signal(symbol, timeframe_str, signal)
+                if CHANNEL_ID:
+                    await context.bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode='Markdown')
+                else:
+                    await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
+                print(f"Alert sent to user {user_id} for {symbol} on {timeframe_str} - {signal}")
     except Exception as e:
         print(f"Error fetching signal for {symbol} on {timeframe_str}: {e}")
         await context.bot.send_message(chat_id=user_id, text=translations['analyze_error'], parse_mode='Markdown')
@@ -280,23 +318,32 @@ async def analyze_and_send_signal(context: ContextTypes.DEFAULT_TYPE, user_id: i
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     add_user_if_not_exists(user_id)
-    lang = get_user_language(user_id)
-    translations = get_messages(lang)
+    user_lang = get_user_language(user_id)
     
-    welcome_message = translations['welcome']
-    
-    if not is_user_subscribed(user_id):
-        welcome_message += translations['subscription_info'].format(
-            binance_wallet_address=BINANCE_WALLET_ADDRESS,
-            price_day=SUBSCRIPTION_PRICES['day'],
-            price_week=SUBSCRIPTION_PRICES['week'],
-            price_month=SUBSCRIPTION_PRICES['month']
-        )
-    
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
-    
-    if is_user_subscribed(user_id):
-        await menu_command(update, context)
+    if not user_lang:
+        keyboard = [
+            [InlineKeyboardButton("العربية", callback_data='set_lang_ar')],
+            [InlineKeyboardButton("English", callback_data='set_lang_en')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(MESSAGES['ar']['welcome_language_select'], reply_markup=reply_markup)
+    else:
+        translations = get_messages(user_lang)
+        welcome_message = translations['welcome']
+        
+        if not is_user_subscribed(user_id):
+            welcome_message += translations['subscription_info'].format(
+                binance_wallet_address=BINANCE_WALLET_ADDRESS,
+                price_day=SUBSCRIPTION_PRICES['day'],
+                price_week=SUBSCRIPTION_PRICES['week'],
+                price_month=SUBSCRIPTION_PRICES['month']
+            )
+            keyboard = [[InlineKeyboardButton(translations['subscription_button'], callback_data='show_subscription_info')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(welcome_message, parse_mode='Markdown', reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(welcome_message, parse_mode='Markdown')
+            await menu_command(update, context)
 
 async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -404,7 +451,9 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     translations = get_messages(lang)
     
     if not is_user_subscribed(user_id):
-        await update.message.reply_text(translations['main_menu_unsubscribed'])
+        keyboard = [[InlineKeyboardButton(translations['subscription_button'], callback_data='show_subscription_info')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(translations['main_menu_unsubscribed'], reply_markup=reply_markup)
         return
 
     keyboard = [
@@ -419,11 +468,59 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+    
+    if query.data.startswith('set_lang_'):
+        lang_code = query.data.split('_')[2]
+        set_user_language(user_id, lang_code)
+        
+        translations = get_messages(lang_code)
+        welcome_message = translations['welcome']
+        
+        if not is_user_subscribed(user_id):
+            welcome_message += translations['subscription_info'].format(
+                binance_wallet_address=BINANCE_WALLET_ADDRESS,
+                price_day=SUBSCRIPTION_PRICES['day'],
+                price_week=SUBSCRIPTION_PRICES['week'],
+                price_month=SUBSCRIPTION_PRICES['month']
+            )
+            keyboard = [[InlineKeyboardButton(translations['subscription_button'], callback_data='show_subscription_info')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            try:
+                await query.edit_message_text(welcome_message, parse_mode='Markdown', reply_markup=reply_markup)
+            except telegram.error.BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise e
+        else:
+            try:
+                await query.edit_message_text(welcome_message, parse_mode='Markdown')
+                await menu_command(query, context)
+            except telegram.error.BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise e
+        return
+
     lang = get_user_language(user_id)
     translations = get_messages(lang)
 
+    if query.data == 'show_subscription_info':
+        welcome_message = translations['welcome']
+        welcome_message += translations['subscription_info'].format(
+            binance_wallet_address=BINANCE_WALLET_ADDRESS,
+            price_day=SUBSCRIPTION_PRICES['day'],
+            price_week=SUBSCRIPTION_PRICES['week'],
+            price_month=SUBSCRIPTION_PRICES['month']
+        )
+        try:
+            await query.edit_message_text(welcome_message, parse_mode='Markdown')
+        except telegram.error.BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise e
+        return
+
     if not is_user_subscribed(user_id):
-        await query.message.reply_text(translations['main_menu_unsubscribed'])
+        keyboard = [[InlineKeyboardButton(translations['subscription_button'], callback_data='show_subscription_info')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.reply_text(translations['main_menu_unsubscribed'], reply_markup=reply_markup)
         return
 
     if query.data == 'symbols':
